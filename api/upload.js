@@ -12,7 +12,7 @@ async function readBody(req) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// Browser -> here (raw bytes, < 4.4 MB) -> Gemini Files API. Returns a file URI the batch can reference.
+// Browser -> here (raw bytes, < 4.4 MB) -> Files API. Returns a file URI the batch can reference.
 module.exports = route(async (req) => {
   const bytes = await readBody(req);
   if (!bytes.length) throw httpError(400, 'Empty file.');
@@ -35,7 +35,7 @@ module.exports = route(async (req) => {
     body: JSON.stringify({ file: { display_name: name } }),
   });
   const uploadUrl = start.headers.get('x-goog-upload-url');
-  if (!uploadUrl) throw httpError(502, 'Gemini did not return an upload URL.');
+  if (!uploadUrl) throw httpError(502, 'The processing service did not return an upload URL.');
 
   // 2) send the bytes and finalize
   const up = await fetch(uploadUrl, {
@@ -54,6 +54,6 @@ module.exports = route(async (req) => {
     await sleep(1500);
     file = (await gemini(`/v1beta/${file.name}`)).data;
   }
-  if (file.state === 'FAILED') throw httpError(422, 'Gemini could not process this file.');
+  if (file.state === 'FAILED') throw httpError(422, 'The processing service could not process this file.');
   return { name: file.name, uri: file.uri, mimeType: file.mimeType || mime, state: file.state };
 });

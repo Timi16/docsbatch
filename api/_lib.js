@@ -3,7 +3,8 @@
 const crypto = require('crypto');
 
 const BASE = 'https://generativelanguage.googleapis.com';
-const DEFAULT_MODELS = ['gemini-3.5-flash-lite', 'gemini-3.8-flash', 'gemini-3.1-flash-lite'];
+const DEFAULT_MODEL = 'gemini-3.8-flash';
+const DEFAULT_MODELS = [DEFAULT_MODEL, 'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite'];
 const MAX_UPLOAD_BYTES = Math.floor(4.4 * 1024 * 1024); // Vercel request bodies are capped at ~4.5 MB
 const MAX_ITEMS = 150;
 const MAX_PARTS_PER_ITEM = 45;
@@ -25,7 +26,7 @@ function allowedModels() {
 
 function apiKey() {
   const k = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
-  if (!k) throw httpError(500, 'GEMINI_API_KEY is not set. Add it in Vercel: Project Settings > Environment Variables, then redeploy.');
+  if (!k) throw httpError(500, 'The processing service is not configured. Ask the site owner.');
   return k;
 }
 
@@ -58,7 +59,7 @@ function route(fn, { method = 'POST', auth = true } = {}) {
   };
 }
 
-// Calls the Gemini REST API with the server-side key.
+// Calls the processing API with the server-side key.
 async function gemini(path, { method = 'GET', json, headers = {}, body } = {}) {
   const h = { 'x-goog-api-key': apiKey(), ...headers };
   let payload = body;
@@ -71,7 +72,7 @@ async function gemini(path, { method = 'GET', json, headers = {}, body } = {}) {
   let data = {};
   try { data = text ? JSON.parse(text) : {}; } catch { data = { raw: text.slice(0, 300) }; }
   if (!r.ok) {
-    const msg = (data && data.error && data.error.message) || `Gemini API error (${r.status})`;
+    const msg = (data && data.error && data.error.message) || `Processing API error (${r.status})`;
     // Never pass 401/403 from Google through: the browser would think the APP password is wrong.
     const status = r.status === 429 ? 429 : r.status >= 500 || r.status === 401 || r.status === 403 ? 502 : r.status;
     throw httpError(status, msg);
@@ -86,7 +87,7 @@ function cleanTask(task) {
 
 function cleanModel(model) {
   const list = allowedModels();
-  if (!model) return list[0];
+  if (!model) return list.includes(DEFAULT_MODEL) ? DEFAULT_MODEL : list[0];
   if (!list.includes(model)) throw httpError(400, 'That model is not allowed on this deployment.');
   return model;
 }

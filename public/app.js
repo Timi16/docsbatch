@@ -16,8 +16,8 @@
     ['Proofread', 'List every spelling, grammar and clarity problem in this document, with a suggested fix for each.'],
   ];
   const STATE_LABEL = {
-    PENDING: 'Waiting in Google’s queue',
-    RUNNING: 'Google is processing your files',
+    PENDING: 'Waiting in the processing queue',
+    RUNNING: 'Processing your files',
     SUCCEEDED: 'Finished',
     FAILED: 'The job failed',
     CANCELLED: 'Cancelled',
@@ -29,7 +29,6 @@
     files: [],
     busy: false,
     config: null,
-    mode: 'batch',
     job: null,
     results: [],
     pw: sessionStorage.getItem(SS_PW) || '',
@@ -213,9 +212,7 @@
     const btn = $('#runBtn');
     btn.disabled = state.busy || !state.files.length;
     btn.textContent = state.busy ? 'Working…' : 'Run on all files';
-    $('#runHint').textContent = state.mode === 'batch'
-      ? 'Batch jobs usually finish in minutes and can run while this tab is closed.'
-      : 'Instant mode answers each file live and costs twice as much.';
+    $('#runHint').textContent = 'Batch jobs can run while this tab is closed.';
   }
 
   // ---- run ---------------------------------------------------------------
@@ -236,12 +233,10 @@
     for (const f of state.files) { if (f.status === 'failed') { f.status = 'queued'; f.error = ''; } }
     renderFiles();
 
-    const model = $('#model').value;
     const useSearch = $('#useSearch').checked;
-    const mode = state.mode;
 
     try {
-      // Phase 1: read every file in the browser and upload it to Gemini.
+      // Phase 1: read every file in the browser and upload it for processing.
       const total = state.files.length;
       let finished = 0;
       showProgress({ title: 'Reading and uploading files', sub: `0 of ${total} done`, pct: 0 });
@@ -280,16 +275,12 @@
       const failed = state.files.filter((f) => f.status === 'failed').map((f) => ({ name: f.name, error: f.error }));
       if (!ready.length) throw new Error('None of the files could be read. See the red messages above.');
 
-      if (mode === 'batch') {
-        const items = ready.map((f, i) => ({ key: 'f' + i, name: f.name, parts: f.uploaded }));
-        showProgress({ title: 'Creating the batch job…', pct: null });
-        const created = await withRetry(() => api('submit', { method: 'POST', json: { model, task, useSearch, items } }));
-        state.job = { name: created.name, model, task, items: items.map(({ key, name }) => ({ key, name })), failed, createdAt: Date.now() };
-        try { localStorage.setItem(LS_JOB, JSON.stringify(state.job)); } catch { /* ignore */ }
-        await pollJob();
-      } else {
-        await runInstant(ready, failed, { model, task, useSearch });
-      }
+      const items = ready.map((f, i) => ({ key: 'f' + i, name: f.name, parts: f.uploaded }));
+      showProgress({ title: 'Creating the batch job…', pct: null });
+      const created = await withRetry(() => api('submit', { method: 'POST', json: { task, useSearch, items } }));
+      state.job = { name: created.name, task, items: items.map(({ key, name }) => ({ key, name })), failed, createdAt: Date.now() };
+      try { localStorage.setItem(LS_JOB, JSON.stringify(state.job)); } catch { /* ignore */ }
+      await pollJob();
     } catch (e) {
       if (e.status === 401) needPassword('Wrong or missing password.');
       else toast(e.message || 'Something went wrong.');
@@ -298,26 +289,6 @@
       state.busy = false;
       renderFiles();
     }
-  }
-
-  async function runInstant(ready, failed, { model, task, useSearch }) {
-    state.results = failed.map((x) => ({ name: x.name, error: x.error }));
-    let done = 0;
-    showProgress({ title: 'Asking Gemini', sub: `0 of ${ready.length} answered`, pct: 0 });
-    renderResults('Results');
-    await pool(ready, 3, async (f) => {
-      try {
-        const r = await withRetry(() => api('instant', { method: 'POST', json: { model, task, useSearch, name: f.name, parts: f.uploaded } }), 4);
-        state.results.push({ name: f.name, ...r });
-      } catch (e) {
-        if (e.status === 401) throw e;
-        state.results.push({ name: f.name, error: e.message });
-      }
-      done++;
-      showProgress({ title: 'Asking Gemini', sub: `${done} of ${ready.length} answered`, pct: (done / ready.length) * 100 });
-      renderResults('Results');
-    });
-    showProgress({ title: 'Finished', sub: `${done} of ${ready.length} answered`, pct: 100 });
   }
 
   // ---- batch polling -----------------------------------------------------
@@ -334,7 +305,7 @@
         st = await api('status?name=' + encodeURIComponent(job.name));
       } catch (e) {
         if (e.status === 401) { stopTimer(); needPassword('Enter the access password to continue.'); return; }
-        showProgress({ title: 'Connection hiccup, retrying…', sub: e.message, pct: null, meta: job.name, cancel: true });
+        showProgress({ title: 'Connection hiccup, retrying…', sub: e.message, pct: null, cancel: true });
         await sleep(delay);
         continue;
       }
@@ -342,7 +313,7 @@
       const s = st.stats;
       const pct = s && s.total ? (((s.ok || 0) + (s.failed || 0)) / s.total) * 100 : null;
       const count = s && s.total ? `${(s.ok || 0) + (s.failed || 0)} of ${s.total} files done` : '';
-      showProgress({ title: label, sub: count, pct: st.terminal ? 100 : pct, meta: `${job.name} · safe to close this tab; reopen it to get the results`, cancel: !st.terminal });
+      showProgress({ title: label, sub: count, pct: st.terminal ? 100 : pct, meta: 'Safe to close this tab; reopen it to get the results.', cancel: !st.terminal });
       if (!count) startTimer((sec) => `Running for ${fmtTime(Math.max(sec, Math.floor((Date.now() - t0) / 1000)))}`);
       else stopTimer();
       if (st.terminal) { stopTimer(); finishJob(st); return; }
@@ -354,7 +325,7 @@
   function finishJob(st) {
     const job = state.job;
     if (st.stateName !== 'SUCCEEDED' || !st.results) {
-      showProgress({ title: STATE_LABEL[st.stateName] || 'Finished', sub: st.error || '', pct: 100, meta: job.name });
+      showProgress({ title: STATE_LABEL[st.stateName] || 'Finished', sub: st.error || '', pct: 100 });
       if (st.error) toast(st.error);
       return;
     }
@@ -367,7 +338,7 @@
     rows.sort((a, b) => a._o - b._o);
     state.results = [...(job.failed || []).map((x) => ({ name: x.name, error: x.error })), ...rows];
     const ok = rows.filter((r) => !r.error).length;
-    showProgress({ title: 'Finished', sub: `${ok} of ${rows.length} files answered`, pct: 100, meta: job.name });
+    showProgress({ title: 'Finished', sub: `${ok} of ${rows.length} files answered`, pct: 100 });
     renderResults('Results · ' + new Date(job.createdAt).toLocaleString());
   }
 
@@ -375,7 +346,7 @@
     if (!state.job) return;
     try {
       await api('cancel', { method: 'POST', json: { name: state.job.name } });
-      toast('Cancel requested. Waiting for Google to confirm…', 'info');
+      toast('Cancel requested. Waiting for confirmation…', 'info');
     } catch (e) { toast(e.message); }
   }
 
@@ -440,13 +411,11 @@
     try {
       const c = await api('config');
       state.config = c;
-      const sel = $('#model');
-      sel.replaceChildren(...c.models.map((m) => el('option', { value: m, text: m })));
       if (!c.hasKey) {
         const p = $('#statusPill');
         p.hidden = false;
-        p.textContent = 'API key missing on server';
-        toast('The server has no GEMINI_API_KEY yet. Add it in Vercel and redeploy.');
+        p.textContent = 'Processing unavailable';
+        toast('The server is not configured to process files. Ask the site owner.');
       }
       if (c.passwordRequired && !c.authorized) $('#pwRow').hidden = false;
     } catch (e) {
@@ -461,7 +430,7 @@
     state.job = saved;
     state.busy = true;
     renderFiles();
-    showProgress({ title: 'Restoring your last job…', pct: null, meta: saved.name, cancel: true });
+    showProgress({ title: 'Restoring your last job…', pct: null, cancel: true });
     pollJob().finally(() => { state.busy = false; renderFiles(); });
   }
 
@@ -485,14 +454,6 @@
     $('#folderInput').addEventListener('change', (e) => { addItems([...e.target.files].map((f) => ({ file: f, name: f.webkitRelativePath || f.name }))); e.target.value = ''; });
     $('#addFolder').addEventListener('click', () => $('#folderInput').click());
     $('#clearFiles').addEventListener('click', () => { if (!state.busy) { state.files = []; renderFiles(); } });
-
-    $('#modeSeg').addEventListener('click', (e) => {
-      const b = e.target.closest('button[data-mode]');
-      if (!b) return;
-      state.mode = b.dataset.mode;
-      for (const x of $('#modeSeg').children) x.classList.toggle('on', x === b);
-      updateRunState();
-    });
 
     $('#pw').value = state.pw;
     $('#pw').addEventListener('input', (e) => { state.pw = e.target.value; try { sessionStorage.setItem(SS_PW, state.pw); } catch { /* ignore */ } });

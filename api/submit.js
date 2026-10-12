@@ -1,7 +1,7 @@
 'use strict';
 const { route, gemini, httpError, MAX_ITEMS, cleanTask, cleanModel, cleanItem, buildRequest } = require('./_lib');
 
-// Creates ONE Gemini batch job: one request per file. The files are already uploaded,
+// Creates one batch job: one request per file. The files are already uploaded,
 // so this body is tiny no matter how big the documents are.
 module.exports = route(async (req) => {
   const b = req.body && typeof req.body === 'object' ? req.body : {};
@@ -27,6 +27,6 @@ module.exports = route(async (req) => {
       },
     },
   });
-  if (!data.name) throw httpError(502, 'Gemini did not return a batch name.');
+  if (!data.name) throw httpError(502, 'The processing service did not return a job name.');
   return { name: data.name, count: items.length };
 });

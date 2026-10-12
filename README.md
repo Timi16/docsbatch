@@ -1,8 +1,8 @@
 # DocBatch
 
-Drop files, type what you want done, get one answer per file. Plain HTML/CSS/JS front end,
-a few small Vercel serverless functions, and the **Gemini Batch API** underneath (50% cheaper than
-live calls). Your Gemini key lives only in Vercel environment variables, never in the browser.
+Drop files, type what you want done, get one answer per file. Plain HTML/CSS/JS front end and a few
+small Vercel serverless functions. Your processing API key lives only in Vercel environment variables,
+never in the browser. Batch processing is asynchronous, not instant.
 
 ## Deploy (about 5 minutes)
 
@@ -11,7 +11,7 @@ live calls). Your Gemini key lives only in Vercel environment variables, never i
 3. **Settings > Environment Variables**, add:
    - `GEMINI_API_KEY` (required): from https://aistudio.google.com/apikey
    - `APP_PASSWORD` (strongly recommended): without it, anyone with the link can spend your quota
-   - `GEMINI_MODELS` (optional): comma-separated model list for the dropdown
+   - `GEMINI_MODELS` (optional): comma-separated list of allowed models; `gemini-3.8-flash` is used by default when allowed
 4. Redeploy so the variables take effect. Open the site, drop files, run.
 
 Local test: `npx vercel dev` with a `.env.local` copied from `.env.example`.
@@ -22,12 +22,11 @@ Local test: `npx vercel dev` with a `.env.local` copied from `.env.example`.
 browser                         Vercel functions (hold the key)          Google
 -------                         --------------------------------         ------
 read each file, make text   ->  /api/upload  (<4 MB each)            ->  Files API
-create batch from file refs ->  /api/submit                          ->  Batch API
-poll every few seconds      ->  /api/status  (returns answers)       <-  Batch API
-(instant mode)              ->  /api/instant (one live call per file)->  generateContent
+create batch from file refs -> /api/submit                          -> Batch API
+poll every few seconds      -> /api/status (returns answers)       <- Batch API
 ```
 
-Vercel limits a request to about 4.5 MB, so files are uploaded one at a time to Gemini's Files API and
+Vercel limits a request to about 4.5 MB, so files are uploaded one at a time to Google's Files API and
 the batch job only references them. That keeps the batch request tiny however many files you add.
 
 ## Formats
@@ -35,7 +34,7 @@ the batch job only references them. That keeps the batch request tiny however ma
 | Kind | How it is read |
 |---|---|
 | PDF with text | text extracted in the browser (pdf.js) |
-| Scanned PDF | sent to Gemini to read visually (or as page images if over 4 MB, first 40 pages) |
+| Scanned PDF | sent for visual reading (or as page images if over 4 MB, first 40 pages) |
 | Word `.docx` `.docm` | text via mammoth |
 | Excel `.xlsx` `.xls` `.xlsm` `.ods` | every sheet as CSV text (SheetJS) |
 | PowerPoint `.pptx` | slide text + speaker notes |
@@ -56,8 +55,8 @@ audio/video over ~4 MB (needs a direct-to-storage upload, see below).
 - Batch jobs are asynchronous. Google targets 24 hours; small jobs often finish in minutes. The page stores the job id
   in your browser, so closing the tab is fine: reopen it and the results load. Google keeps results for 6 weeks.
 - Uploaded files are deleted by Google after 48 hours.
-- Free-tier Gemini keys: Google may use submitted content to improve its products. Use a billing-enabled key for private documents.
-- "Allow Google Search" adds grounded search to each request and is billed separately by Google.
+- Free-tier keys: Google may use submitted content to improve its products. Use a billing-enabled key for private documents.
+- "Allow web search" adds grounded search to each request and is billed separately by Google. It is enabled by default.
 
 ## Files
 
