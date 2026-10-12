@@ -291,7 +291,7 @@
     btn.disabled = state.busy || !state.files.length;
     btn.textContent = state.busy ? 'Working…' : 'Run on all files';
     $('#runHint').textContent = state.mode === 'batch'
-      ? 'Batch jobs run in the background and may take up to 24 hours.'
+      ? 'Batch jobs run in the background and may take up to an hour.'
       : 'Quick mode returns live answers and works best for a few files.';
   }
 

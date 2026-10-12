@@ -53,7 +53,7 @@ audio/video over 20 MB.
 - **20 MB per uploaded file**. Files are sent in 4 MB chunks to stay below Vercel's request-body limit.
   Extracted text and spreadsheets are truncated to about 4 MB.
 - **150 files per run** so the answers fit in one 4.5 MB response.
-- Batch jobs are asynchronous. Google targets 24 hours; small jobs often finish in minutes. Use Quick mode for live
+- Batch jobs are asynchronous and may take up to an hour. Use Quick mode for live
   responses on a few files. The page stores the batch job id
   in your browser, so closing the tab is fine: reopen it and the results load. Google keeps results for 6 weeks.
 - Uploaded files are deleted by Google after 48 hours.
