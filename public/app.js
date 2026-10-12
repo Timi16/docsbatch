@@ -25,7 +25,10 @@
     CANCELLED: 'Cancelled',
     EXPIRED: 'Expired',
   };
-  const STATUS_LABEL = { queued: 'Queued', reading: 'Reading…', uploading: 'Uploading…', ready: 'Ready', failed: 'Failed' };
+  const STATUS_LABEL = {
+    queued: 'Queued', reading: 'Reading…', uploading: 'Uploading…', ready: 'Ready',
+    processing: 'Processing', processed: 'Processed', cancelled: 'Cancelled', failed: 'Failed',
+  };
 
   const state = {
     files: [],
@@ -37,6 +40,13 @@
     pw: sessionStorage.getItem(SS_PW) || '',
     timer: null,
     nextId: 1,
+    formatterNoticeShown: false,
+  };
+  const formatterLoads = {};
+  const FORMATTER_SCRIPTS = {
+    markdown: 'https://cdn.jsdelivr.net/npm/marked@15.0.7/marked.min.js',
+    sanitize: 'https://cdn.jsdelivr.net/npm/dompurify@3.2.6/dist/purify.min.js',
+    math: 'https://cdn.jsdelivr.net/npm/mathjax@3.2.2/es5/tex-chtml.js',
   };
 
   // ---- small helpers -----------------------------------------------------
@@ -108,6 +118,45 @@
       }
     }
     throw last;
+  }
+  function loadScript(key) {
+    if (!formatterLoads[key]) {
+      formatterLoads[key] = new Promise((resolve, reject) => {
+        if (key === 'math') {
+          window.MathJax = {
+            tex: {
+              inlineMath: [['\\(', '\\)'], ['$', '$']],
+              displayMath: [['\\[', '\\]'], ['$$', '$$']],
+              processEscapes: true,
+            },
+            options: { skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code'] },
+            startup: { typeset: false },
+          };
+        }
+        const script = document.createElement('script');
+        script.src = FORMATTER_SCRIPTS[key];
+        script.onload = resolve;
+        script.onerror = () => {
+          delete formatterLoads[key];
+          reject(new Error(`Could not load the ${key} formatter.`));
+        };
+        document.head.append(script);
+      });
+    }
+    return formatterLoads[key];
+  }
+  async function loadMathJax() {
+    await loadScript('math');
+    await window.MathJax.startup.promise;
+    return window.MathJax;
+  }
+  async function loadMarkdownFormatter() {
+    await Promise.all([loadScript('markdown'), loadScript('sanitize')]);
+    return { marked: window.marked, DOMPurify: window.DOMPurify };
+  }
+  function setStatuses(files, status) {
+    files.forEach((file) => { file.status = status; });
+    renderFiles();
   }
   async function uploadFile(file) {
     if (file.blob.size > MAX_FILE_BYTES) throw new Error(`${file.name} is larger than the 20 MB per-file limit.`);
@@ -223,6 +272,9 @@
     $('#progSub').textContent = sub;
     $('#progMeta').textContent = meta;
     $('#cancelBtn').hidden = !cancel;
+    const pctLabel = $('#progPct');
+    pctLabel.hidden = pct === null;
+    pctLabel.textContent = pct === null ? '' : `${Math.round(pct)}%`;
     const bar = $('#progBar');
     bar.classList.toggle('indet', pct === null);
     bar.firstElementChild.style.width = pct === null ? '' : Math.max(2, Math.min(100, pct)) + '%';
@@ -306,7 +358,8 @@
         const items = ready.map((f, i) => ({ key: 'f' + i, name: f.name, parts: f.uploaded }));
         showProgress({ title: 'Creating the batch job…', pct: null });
         const created = await withRetry(() => api('submit', { method: 'POST', json: { task, useSearch, items } }));
-        state.job = { name: created.name, task, items: items.map(({ key, name }) => ({ key, name })), failed, createdAt: Date.now() };
+        state.job = { name: created.name, task, items: items.map(({ key, name }, i) => ({ key, name, id: ready[i].id })), failed, createdAt: Date.now() };
+        setStatuses(ready, 'processing');
         try { localStorage.setItem(LS_JOB, JSON.stringify(state.job)); } catch { /* ignore */ }
         await pollJob();
       }
@@ -323,6 +376,7 @@
   async function runQuick(ready, failed, { task, useSearch }) {
     const rows = new Array(ready.length);
     let done = 0;
+    setStatuses(ready, 'processing');
     showProgress({ title: 'Getting quick answers', sub: `0 of ${ready.length} answered`, pct: 0 });
     await pool(ready, 3, async (f, i) => {
       try {
@@ -331,11 +385,14 @@
           json: { task, useSearch, name: f.name, parts: f.uploaded },
         }), 4);
         rows[i] = { name: f.name, ...result };
+        f.status = result.error ? 'failed' : 'processed';
       } catch (e) {
         if (e.status === 401) throw e;
         rows[i] = { name: f.name, error: e.message || 'Could not process this file.' };
+        f.status = 'failed';
       }
       done++;
+      renderFiles();
       state.results = [...failed, ...rows.filter(Boolean)];
       showProgress({ title: 'Getting quick answers', sub: `${done} of ${ready.length} answered`, pct: (done / ready.length) * 100 });
       renderResults('Results');
@@ -365,9 +422,10 @@
       }
       const label = STATE_LABEL[st.stateName] || st.stateName || 'Waiting';
       const s = st.stats;
-      const pct = s && s.total ? (((s.ok || 0) + (s.failed || 0)) / s.total) * 100 : null;
-      const count = s && s.total ? `${(s.ok || 0) + (s.failed || 0)} of ${s.total} files done` : '';
-      showProgress({ title: label, sub: count, pct: st.terminal ? 100 : pct, meta: 'Safe to close this tab; reopen it to get the results.', cancel: !st.terminal });
+      const complete = s ? (s.ok || 0) + (s.failed || 0) : 0;
+      const pct = s && s.total ? (complete / s.total) * 100 : null;
+      const count = s && s.total ? `${complete} of ${s.total} files processed` : '';
+      showProgress({ title: label, sub: count || 'Waiting for processing updates…', pct: st.stateName === 'SUCCEEDED' ? 100 : pct, meta: 'Safe to close this tab; reopen it to get the results.', cancel: !st.terminal });
       if (!count) startTimer((sec) => `Running for ${fmtTime(Math.max(sec, Math.floor((Date.now() - t0) / 1000)))}`);
       else stopTimer();
       if (st.terminal) { stopTimer(); finishJob(st); return; }
@@ -379,16 +437,32 @@
   function finishJob(st) {
     const job = state.job;
     if (st.stateName !== 'SUCCEEDED' || !st.results) {
+      for (const item of job.items) {
+        const file = state.files.find((entry) => entry.id === item.id);
+        if (file) file.status = st.stateName === 'CANCELLED' ? 'cancelled' : 'failed';
+      }
+      renderFiles();
       showProgress({ title: STATE_LABEL[st.stateName] || 'Finished', sub: st.error || '', pct: 100 });
       if (st.error) toast(st.error);
       return;
     }
     const byKey = new Map(job.items.map((it, i) => [it.key, { ...it, i }]));
     const rows = [];
+    const completed = new Set();
     for (const r of st.results) {
       const it = (r.key && byKey.get(r.key)) || job.items[r.index] || { name: 'file ' + (r.index + 1) };
+      if (it.key) completed.add(it.key);
+      const file = state.files.find((entry) => entry.id === it.id);
+      if (file) file.status = r.error ? 'failed' : 'processed';
       rows.push({ name: it.name, text: r.text, error: r.error, warning: r.warning, sources: r.sources, _o: (byKey.get(r.key) || {}).i ?? r.index });
     }
+    for (const item of job.items) {
+      if (!completed.has(item.key)) {
+        const file = state.files.find((entry) => entry.id === item.id);
+        if (file) file.status = 'failed';
+      }
+    }
+    renderFiles();
     rows.sort((a, b) => a._o - b._o);
     state.results = [...(job.failed || []).map((x) => ({ name: x.name, error: x.error })), ...rows];
     const ok = rows.filter((r) => !r.error).length;
@@ -405,7 +479,7 @@
   }
 
   // ---- results -----------------------------------------------------------
-  function renderResults(title) {
+  async function renderResults(title) {
     $('#resCard').hidden = false;
     $('#resTitle').textContent = title || 'Results';
     const q = $('#resFilter').value.trim().toLowerCase();
@@ -414,12 +488,12 @@
     const rows = state.results.filter((r) => !q || r.name.toLowerCase().includes(q) || String(r.text || r.error || '').toLowerCase().includes(q));
     if (!rows.length) { list.append(el('div', { class: 'empty', text: 'No results match.' })); return; }
     const openAll = rows.length <= 12;
+    const formatting = [];
     for (const r of rows) {
       const ok = !r.error;
       const body = ok ? r.text : r.error;
       const links = (r.sources || []).filter((s) => /^https?:\/\//i.test(s.uri)).map((s) => el('a', { href: s.uri, target: '_blank', rel: 'noopener noreferrer', text: s.title }));
       const answer = el('div', { class: 'ans' });
-      renderAnswer(answer, body);
       list.append(
         el('details', { class: 'res' + (ok ? '' : ' bad'), open: openAll ? '' : null },
           el('summary', {},
@@ -432,94 +506,78 @@
           links.length ? el('div', { class: 'srcs' }, 'Sources:', links) : null
         )
       );
+      formatting.push(renderAnswer(answer, body));
+    }
+    await Promise.all(formatting);
+  }
+
+  async function renderAnswer(container, text) {
+    const raw = String(text || '');
+    container.textContent = raw;
+    if (!container.isConnected) return;
+    const mathBlocks = [];
+    const tokenized = raw.replace(/(\$\$[\s\S]+?\$\$|\\\[[\s\S]+?\\\]|\\\([\s\S]+?\\\]|(?<!\$)\$(?!\$)[^\n$]+?\$)/g, (math) => {
+      const token = `DOCBATCHMATHPLACEHOLDER${mathBlocks.length}END`;
+      mathBlocks.push({ token, math });
+      return token;
+    });
+    let mathJaxNeeded = false;
+    try {
+      const { marked, DOMPurify } = await loadMarkdownFormatter();
+      if (!container.isConnected) return;
+      const html = marked.parse(tokenized, { gfm: true, breaks: false });
+      container.innerHTML = DOMPurify.sanitize(html);
+      if (mathBlocks.length) {
+        const walker = container.ownerDocument.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+        const nodes = [];
+        while (walker.nextNode()) nodes.push(walker.currentNode);
+        for (const node of nodes) {
+          if (!node.nodeValue.includes('DOCBATCHMATHPLACEHOLDER')) continue;
+          const fragment = container.ownerDocument.createDocumentFragment();
+          let value = node.nodeValue;
+          while (value) {
+            const next = mathBlocks
+              .map(({ token, math }) => ({ at: value.indexOf(token), token, math }))
+              .filter((part) => part.at >= 0)
+              .sort((a, b) => a.at - b.at)[0];
+            if (!next) { fragment.append(container.ownerDocument.createTextNode(value)); break; }
+            if (next.at) fragment.append(container.ownerDocument.createTextNode(value.slice(0, next.at)));
+            fragment.append(container.ownerDocument.createTextNode(next.math));
+            value = value.slice(next.at + next.token.length);
+          }
+          node.replaceWith(fragment);
+        }
+        mathJaxNeeded = true;
+      }
+    } catch (error) {
+      if (!state.formatterNoticeShown) {
+        state.formatterNoticeShown = true;
+        toast(`Could not load Markdown formatting: ${error.message}. Showing the original text instead.`);
+      }
+      if (container.isConnected) container.textContent = raw;
+      return;
+    }
+    if (mathJaxNeeded) {
+      try {
+        const mathJax = await loadMathJax();
+        if (container.isConnected) await mathJax.typesetPromise([container]);
+      } catch (error) {
+        if (!state.formatterNoticeShown) {
+          state.formatterNoticeShown = true;
+          toast(`Could not load math formatting: ${error.message}. Other answer formatting is still available.`);
+        }
+      }
     }
   }
 
-  function renderAnswer(container, text) {
-    const doc = container.ownerDocument;
-    container.replaceChildren();
-    const lines = String(text || '').split(/\r?\n/);
-    let i = 0;
-
-    function inline(parent, value) {
-      const parts = value.split(/(`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*)/g);
-      for (const part of parts) {
-        let node;
-        if (/^`[^`]+`$/.test(part)) {
-          node = doc.createElement('code');
-          node.textContent = part.slice(1, -1);
-        } else if (/^\*\*[^*]+\*\*$/.test(part)) {
-          node = doc.createElement('strong');
-          node.textContent = part.slice(2, -2);
-        } else if (/^\*[^*]+\*$/.test(part)) {
-          node = doc.createElement('em');
-          node.textContent = part.slice(1, -1);
-        } else {
-          node = doc.createTextNode(part);
-        }
-        parent.append(node);
-      }
-    }
-
-    while (i < lines.length) {
-      const line = lines[i];
-      if (!line.trim()) { i++; continue; }
-      const fence = line.match(/^```/);
-      if (fence) {
-        i++;
-        const code = [];
-        while (i < lines.length && !/^```/.test(lines[i])) code.push(lines[i++]);
-        if (i < lines.length) i++;
-        const pre = doc.createElement('pre');
-        pre.className = 'code-block';
-        pre.textContent = code.join('\n');
-        container.append(pre);
-        continue;
-      }
-      const heading = line.match(/^(#{1,6})\s+(.+)$/);
-      if (heading) {
-        const node = doc.createElement(`h${Math.min(4, heading[1].length)}`);
-        inline(node, heading[2]);
-        container.append(node);
-        i++;
-        continue;
-      }
-      const item = line.match(/^\s*([-*+]|\d+[.)])\s+(.+)$/);
-      if (item) {
-        const ordered = /^\d/.test(item[1]);
-        const list = doc.createElement(ordered ? 'ol' : 'ul');
-        while (i < lines.length) {
-          const match = lines[i].match(/^\s*([-*+]|\d+[.)])\s+(.+)$/);
-          if (!match || /^\d/.test(match[1]) !== ordered) break;
-          const li = doc.createElement('li');
-          inline(li, match[2]);
-          list.append(li);
-          i++;
-        }
-        container.append(list);
-        continue;
-      }
-      const paragraph = doc.createElement('p');
-      const textLines = [];
-      while (i < lines.length && lines[i].trim()
-        && !/^```/.test(lines[i])
-        && !/^(#{1,6})\s+/.test(lines[i])
-        && !/^\s*([-*+]|\d+[.)])\s+/.test(lines[i])) {
-        textLines.push(lines[i++]);
-      }
-      inline(paragraph, textLines.join(' '));
-      container.append(paragraph);
-    }
-  }
-
-  function printResults() {
+  async function printResults() {
     if (!state.results.length) return toast('Nothing to save yet.');
     const previousTitle = document.title;
     const previousFilter = $('#resFilter').value;
     document.title = `DocBatch results ${new Date().toISOString().slice(0, 10)}`;
     document.body.classList.add('printing');
     $('#resFilter').value = '';
-    renderResults('Results');
+    await renderResults('Results');
     const details = [...$('#resList').querySelectorAll('details')];
     const previousOpen = details.map((node) => node.open);
     details.forEach((node) => { node.open = true; });

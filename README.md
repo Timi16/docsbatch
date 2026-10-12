@@ -59,7 +59,7 @@ audio/video over 20 MB.
 - Uploaded files are deleted by Google after 48 hours.
 - Free-tier keys: Google may use submitted content to improve its products. Use a billing-enabled key for private documents.
 - "Allow web search" adds grounded search to each request and is billed separately by Google. It is enabled by default.
-- Results support headings, lists, and basic inline Markdown. Use Download > Save as PDF to open the browser print dialog, then choose Save as PDF.
+- Results use Markdown rendering with HTML sanitization and MathJax for equations. Use Download > Save as PDF to open the browser print dialog, then choose Save as PDF.
 
 ## Files
 
