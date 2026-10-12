@@ -5,7 +5,8 @@ const crypto = require('crypto');
 const BASE = 'https://generativelanguage.googleapis.com';
 const DEFAULT_MODEL = 'gemini-3.8-flash';
 const DEFAULT_MODELS = [DEFAULT_MODEL, 'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite'];
-const MAX_UPLOAD_BYTES = Math.floor(4.4 * 1024 * 1024); // Vercel request bodies are capped at ~4.5 MB
+const MAX_UPLOAD_CHUNK_BYTES = Math.floor(4.4 * 1024 * 1024); // Vercel request bodies are capped at ~4.5 MB
+const MAX_FILE_BYTES = 20 * 1024 * 1024;
 const MAX_ITEMS = 150;
 const MAX_PARTS_PER_ITEM = 45;
 
@@ -144,7 +145,7 @@ function normalize(r) {
 }
 
 module.exports = {
-  BASE, MAX_UPLOAD_BYTES, MAX_ITEMS, SYSTEM,
+  BASE, MAX_UPLOAD_CHUNK_BYTES, MAX_FILE_BYTES, MAX_ITEMS, SYSTEM,
   httpError, allowedModels, apiKey, checkAuth, route, gemini,
   cleanTask, cleanModel, cleanItem, buildRequest, normalize,
 };

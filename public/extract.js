@@ -2,14 +2,15 @@
  *
  * prepare(file, name) -> { blobs: [{ blob, mime, name }], note }
  *   - text-like files, Word, Excel, PowerPoint, OpenDocument, RTF, EPUB, text PDFs -> plain text
- *   - scanned PDFs -> the PDF itself (or page images if it is too big)
+ *   - scanned PDFs -> the PDF itself, up to 20 MB
  *   - images -> as-is, or converted/downscaled to JPEG
  *   - audio / video -> as-is when small enough
  * expandZips(items) unpacks .zip files into their individual files.
  */
 window.Extract = (() => {
-  // Vercel limits a request body to ~4.5 MB, so every uploaded blob stays under this.
-  const MAX = 4 * 1024 * 1024 - 64 * 1024;
+  const MAX_TEXT = 4 * 1024 * 1024 - 64 * 1024;
+  const MAX_FILE = 20 * 1024 * 1024;
+  const MAX_CHUNK = 4 * 1024 * 1024;
 
   const CDN = {
     mammoth: 'https://cdn.jsdelivr.net/npm/mammoth@1.8.0/mammoth.browser.min.js',
@@ -62,13 +63,13 @@ window.Extract = (() => {
     if (!text) throw new Error('No text found in this file.');
     const bytes = new TextEncoder().encode(text);
     let truncated = false;
-    if (bytes.length > MAX) {
-      text = new TextDecoder().decode(bytes.slice(0, MAX - 64)) + '\n\n[... truncated to fit the upload limit ...]';
+    if (bytes.length > MAX_TEXT) {
+      text = new TextDecoder().decode(bytes.slice(0, MAX_TEXT - 64)) + '\n\n[... truncated to fit the text limit ...]';
       truncated = true;
     }
     return {
       blobs: [{ blob: new Blob([text], { type: 'text/plain' }), mime: 'text/plain', name: name + '.txt' }],
-      note: [note, truncated ? 'truncated to ~4 MB of text' : ''].filter(Boolean).join(' · '),
+      note: [note, truncated ? 'text truncated to ~4 MB' : ''].filter(Boolean).join(' · '),
     };
   }
 
@@ -85,6 +86,9 @@ window.Extract = (() => {
 
   // ---- individual readers ------------------------------------------------
   async function readPdf(file, name) {
+    if (file.size > MAX_FILE) {
+      throw new Error(`PDF is ${mb(file.size)}; this deployment accepts PDFs up to 20 MB.`);
+    }
     await load('pdf');
     window.pdfjsLib.GlobalWorkerOptions.workerSrc = CDN.pdfWorker;
     const data = new Uint8Array(await file.arrayBuffer());
@@ -104,26 +108,7 @@ window.Extract = (() => {
     if (chars / doc.numPages >= 40) return finish(text, name, `${doc.numPages} page${doc.numPages > 1 ? 's' : ''}, text read`);
 
     // Scanned / image-only PDF: let Gemini read it visually.
-    if (file.size <= MAX) {
-      return { blobs: [{ blob: file, mime: 'application/pdf', name }], note: 'scanned PDF, sent as-is for visual reading' };
-    }
-    const maxPages = Math.min(doc.numPages, 40);
-    const blobs = [];
-    for (let p = 1; p <= maxPages; p++) {
-      const page = await doc.getPage(p);
-      const viewport = page.getViewport({ scale: 1.5 });
-      const canvas = document.createElement('canvas');
-      canvas.width = Math.round(viewport.width);
-      canvas.height = Math.round(viewport.height);
-      await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
-      const blob = await new Promise((r) => canvas.toBlob(r, 'image/jpeg', 0.72));
-      if (blob) blobs.push({ blob, mime: 'image/jpeg', name: `${name}-p${p}.jpg` });
-      page.cleanup();
-    }
-    return {
-      blobs,
-      note: `scanned PDF too big to send whole: ${maxPages} of ${doc.numPages} pages sent as images`,
-    };
+    return { blobs: [{ blob: file, mime: 'application/pdf', name }], note: 'scanned PDF, sent as-is for visual reading' };
   }
 
   async function readDocx(file, name) {
@@ -221,7 +206,7 @@ window.Extract = (() => {
         ctx.fillRect(0, 0, w, h);
         ctx.drawImage(img, 0, 0, w, h);
         const b = await new Promise((r) => c.toBlob(r, 'image/jpeg', q));
-        if (b && b.size <= MAX) return b;
+        if (b && b.size <= MAX_FILE) return b;
         max = Math.round(max * 0.75);
         q = Math.max(0.6, q - 0.08);
       }
@@ -233,17 +218,17 @@ window.Extract = (() => {
 
   async function readImage(file, name, e) {
     const native = IMG_NATIVE[e];
-    if (native && file.size <= MAX) return { blobs: [{ blob: file, mime: native, name }], note: 'image sent as-is' };
+    if (native && file.size <= MAX_FILE) return { blobs: [{ blob: file, mime: native, name }], note: 'image sent as-is' };
     const blob = await toJpeg(file);
     return {
       blobs: [{ blob, mime: 'image/jpeg', name: name.replace(/\.[^.]+$/, '') + '.jpg' }],
-      note: native ? 'image downscaled to fit the upload limit' : 'image converted to JPEG',
+      note: native ? 'image downscaled to fit the 20 MB file limit' : 'image converted to JPEG',
     };
   }
 
   function readMedia(file, name, mime, kind) {
-    if (file.size > MAX) {
-      throw new Error(`${kind} file is ${mb(file.size)}; this deployment accepts up to about 4 MB per file.`);
+    if (file.size > MAX_FILE) {
+      throw new Error(`${kind} file is ${mb(file.size)}; this deployment accepts up to 20 MB per file.`);
     }
     return { blobs: [{ blob: file, mime, name }], note: `${kind.toLowerCase()} sent as-is` };
   }
@@ -300,5 +285,5 @@ window.Extract = (() => {
     return out;
   }
 
-  return { prepare, expandZips, ext, MAX };
+  return { prepare, expandZips, ext, MAX_FILE, MAX_CHUNK };
 })();

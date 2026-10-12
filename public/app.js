@@ -4,6 +4,8 @@
 
   const $ = (s) => document.querySelector(s);
   const MAX_FILES = 150;
+  const MAX_FILE_BYTES = window.Extract.MAX_FILE;
+  const UPLOAD_CHUNK_BYTES = window.Extract.MAX_CHUNK;
   const LS_JOB = 'docbatch.job.v1';
   const LS_TASK = 'docbatch.task.v1';
   const SS_PW = 'docbatch.pw';
@@ -106,6 +108,29 @@
       }
     }
     throw last;
+  }
+  async function uploadFile(file) {
+    if (file.blob.size > MAX_FILE_BYTES) throw new Error(`${file.name} is larger than the 20 MB per-file limit.`);
+    const session = await api('upload', {
+      method: 'POST',
+      json: { name: file.name, mime: file.mime, size: file.blob.size },
+    });
+    for (let offset = 0; offset < file.blob.size; offset += UPLOAD_CHUNK_BYTES) {
+      const end = Math.min(offset + UPLOAD_CHUNK_BYTES, file.blob.size);
+      const final = end === file.blob.size;
+      const result = await api('upload', {
+        method: 'POST',
+        body: file.blob.slice(offset, end),
+        headers: {
+          'Content-Type': 'application/octet-stream',
+          'x-upload-url': session.uploadUrl,
+          'x-upload-offset': String(offset),
+          'x-upload-command': final ? 'upload, finalize' : 'upload',
+        },
+      });
+      if (final) return result;
+    }
+    throw new Error(`Upload did not finish for ${file.name}.`);
   }
   async function pool(items, limit, worker) {
     let i = 0;
@@ -254,11 +279,7 @@
             setStatus(f, 'uploading');
             const parts = [];
             for (const b of prep.blobs) {
-              const up = await withRetry(() => api('upload', {
-                method: 'POST',
-                body: b.blob,
-                headers: { 'Content-Type': 'application/octet-stream', 'x-mime-type': b.mime, 'x-file-name': encodeURIComponent(b.name) },
-              }));
+              const up = await withRetry(() => uploadFile(b));
               parts.push({ uri: up.uri, mimeType: up.mimeType || b.mime });
             }
             f.uploaded = parts;
