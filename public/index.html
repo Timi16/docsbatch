@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DocBatch · Run any file through Gemini</title>
+  <meta name="description" content="Drop files, say what you want done, get an answer for every file. Powered by the Gemini Batch API.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%237c5cff'/%3E%3Cpath d='M9 10h14M9 16h14M9 22h8' stroke='white' stroke-width='2.4' stroke-linecap='round'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div class="glow" aria-hidden="true"></div>
+  <main class="wrap">
+
+    <header class="top">
+      <div class="brand">
+        <span class="logo" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M5 7h14M5 12h14M5 17h8"/></svg>
+        </span>
+        DocBatch
+      </div>
+      <span class="pill" id="statusPill" hidden></span>
+    </header>
+
+    <section class="hero">
+      <h1>Drop files. Say what to do.<br><em>Get an answer for each one.</em></h1>
+      <p>PDFs, Word, Excel, PowerPoint, images, scans, emails, code, zips and more. One instruction runs on every file through the Gemini Batch API.</p>
+    </section>
+
+    <section class="card" id="filesCard">
+      <div class="dropzone" id="drop" tabindex="0" role="button" aria-label="Add files">
+        <svg viewBox="0 0 24 24" width="34" height="34" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5"/><path d="M4 15v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3"/></svg>
+        <strong>Drag files or folders here</strong>
+        <span>or click to browse · up to 150 files</span>
+      </div>
+      <input type="file" id="fileInput" multiple hidden>
+      <input type="file" id="folderInput" webkitdirectory hidden>
+
+      <div class="filebar" id="fileBar" hidden>
+        <span id="fileCount"></span>
+        <span class="spacer"></span>
+        <button type="button" class="link" id="addFolder">Add folder</button>
+        <button type="button" class="link" id="clearFiles">Clear all</button>
+      </div>
+      <ul class="files" id="fileList"></ul>
+    </section>
+
+    <section class="card" id="taskCard">
+      <label for="task" class="lbl">What should be done with each file?</label>
+      <textarea id="task" rows="4" placeholder="e.g. Summarize this in 3 bullets, or: extract every name, email and phone number as JSON"></textarea>
+      <div class="chips" id="presets" aria-label="Example instructions"></div>
+
+      <div class="opts">
+        <div class="opt">
+          <label for="model">Model</label>
+          <select id="model"></select>
+        </div>
+        <div class="opt">
+          <label id="modeLbl">Mode</label>
+          <div class="seg" id="modeSeg" role="group" aria-labelledby="modeLbl">
+            <button type="button" data-mode="batch" class="on">Batch <small>50% cheaper · async</small></button>
+            <button type="button" data-mode="instant">Instant <small>live · full price</small></button>
+          </div>
+        </div>
+        <label class="check"><input type="checkbox" id="useSearch"> Allow Google Search</label>
+      </div>
+
+      <div class="pwrow" id="pwRow" hidden>
+        <label for="pw">Access password</label>
+        <input type="password" id="pw" autocomplete="current-password" placeholder="Ask the site owner">
+      </div>
+
+      <div class="actions">
+        <button type="button" class="primary" id="runBtn">Run on all files</button>
+        <span class="hint" id="runHint"></span>
+      </div>
+    </section>
+
+    <section class="card" id="progCard" hidden aria-live="polite">
+      <div class="prog-head">
+        <div>
+          <div class="prog-title" id="progTitle">Working…</div>
+          <div class="prog-sub" id="progSub"></div>
+        </div>
+        <button type="button" class="ghost" id="cancelBtn" hidden>Cancel job</button>
+      </div>
+      <div class="bar" id="progBar"><i></i></div>
+      <div class="prog-meta" id="progMeta"></div>
+    </section>
+
+    <section id="resCard" hidden>
+      <div class="res-head">
+        <h2 id="resTitle">Results</h2>
+        <div class="res-tools">
+          <input type="search" id="resFilter" placeholder="Filter results…" aria-label="Filter results">
+          <button type="button" class="ghost" id="copyAll">Copy all</button>
+          <div class="menu">
+            <button type="button" class="ghost" id="dlBtn">Download ▾</button>
+            <div class="menu-list" id="dlMenu" hidden>
+              <button type="button" data-fmt="csv">CSV (Excel)</button>
+              <button type="button" data-fmt="json">JSON</button>
+              <button type="button" data-fmt="md">Markdown</button>
+              <button type="button" data-fmt="txt">Plain text</button>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div id="resList"></div>
+    </section>
+
+    <footer>
+      <p>Your files are read in your browser, then sent to Google's Gemini API through this site. Batch jobs are processed by Google within 24 hours (often minutes) and uploaded files are deleted by Google after 48 hours.</p>
+    </footer>
+  </main>
+
+  <div id="toast" role="status" aria-live="polite"></div>
+  <script src="/extract.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>
