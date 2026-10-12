@@ -1,8 +1,8 @@
 # DocBatch
 
-Drop files, type what you want done, get one answer per file. Plain HTML/CSS/JS front end and a few
-small Vercel serverless functions. Your processing API key lives only in Vercel environment variables,
-never in the browser. Batch processing is asynchronous, not instant.
+Drop files, type what you want done, get one answer per file. Choose quick live answers for a few files
+or asynchronous batch processing for larger runs. Your processing API key lives only in Vercel
+environment variables, never in the browser.
 
 ## Deploy (about 5 minutes)
 
@@ -24,6 +24,7 @@ browser                         Vercel functions (hold the key)          Google
 read each file, make text   ->  /api/upload  (<4 MB each)            ->  Files API
 create batch from file refs -> /api/submit                          -> Batch API
 poll every few seconds      -> /api/status (returns answers)       <- Batch API
+(quick mode)                 -> /api/instant (one live call per file)-> generateContent
 ```
 
 Vercel limits a request to about 4.5 MB, so files are uploaded one at a time to Google's Files API and
@@ -52,11 +53,13 @@ audio/video over ~4 MB (needs a direct-to-storage upload, see below).
 - **4 MB per uploaded file** (Vercel body limit). Text files and spreadsheets are truncated to fit. To lift this,
   upload straight from the browser to Vercel Blob or Google Cloud Storage and reference the URL.
 - **150 files per run** so the answers fit in one 4.5 MB response.
-- Batch jobs are asynchronous. Google targets 24 hours; small jobs often finish in minutes. The page stores the job id
+- Batch jobs are asynchronous. Google targets 24 hours; small jobs often finish in minutes. Use Quick mode for live
+  responses on a few files. The page stores the batch job id
   in your browser, so closing the tab is fine: reopen it and the results load. Google keeps results for 6 weeks.
 - Uploaded files are deleted by Google after 48 hours.
 - Free-tier keys: Google may use submitted content to improve its products. Use a billing-enabled key for private documents.
 - "Allow web search" adds grounded search to each request and is billed separately by Google. It is enabled by default.
+- Results support headings, lists, and basic inline Markdown. Use Download > Save as PDF to open the browser print dialog, then choose Save as PDF.
 
 ## Files
 

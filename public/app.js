@@ -29,6 +29,7 @@
     files: [],
     busy: false,
     config: null,
+    mode: 'quick',
     job: null,
     results: [],
     pw: sessionStorage.getItem(SS_PW) || '',
@@ -212,7 +213,9 @@
     const btn = $('#runBtn');
     btn.disabled = state.busy || !state.files.length;
     btn.textContent = state.busy ? 'Working…' : 'Run on all files';
-    $('#runHint').textContent = 'Batch jobs can run while this tab is closed.';
+    $('#runHint').textContent = state.mode === 'batch'
+      ? 'Batch jobs run in the background and may take up to 24 hours.'
+      : 'Quick mode returns live answers and works best for a few files.';
   }
 
   // ---- run ---------------------------------------------------------------
@@ -234,6 +237,7 @@
     renderFiles();
 
     const useSearch = $('#useSearch').checked;
+    const mode = state.mode;
 
     try {
       // Phase 1: read every file in the browser and upload it for processing.
@@ -275,12 +279,16 @@
       const failed = state.files.filter((f) => f.status === 'failed').map((f) => ({ name: f.name, error: f.error }));
       if (!ready.length) throw new Error('None of the files could be read. See the red messages above.');
 
-      const items = ready.map((f, i) => ({ key: 'f' + i, name: f.name, parts: f.uploaded }));
-      showProgress({ title: 'Creating the batch job…', pct: null });
-      const created = await withRetry(() => api('submit', { method: 'POST', json: { task, useSearch, items } }));
-      state.job = { name: created.name, task, items: items.map(({ key, name }) => ({ key, name })), failed, createdAt: Date.now() };
-      try { localStorage.setItem(LS_JOB, JSON.stringify(state.job)); } catch { /* ignore */ }
-      await pollJob();
+      if (mode === 'quick') {
+        await runQuick(ready, failed, { task, useSearch });
+      } else {
+        const items = ready.map((f, i) => ({ key: 'f' + i, name: f.name, parts: f.uploaded }));
+        showProgress({ title: 'Creating the batch job…', pct: null });
+        const created = await withRetry(() => api('submit', { method: 'POST', json: { task, useSearch, items } }));
+        state.job = { name: created.name, task, items: items.map(({ key, name }) => ({ key, name })), failed, createdAt: Date.now() };
+        try { localStorage.setItem(LS_JOB, JSON.stringify(state.job)); } catch { /* ignore */ }
+        await pollJob();
+      }
     } catch (e) {
       if (e.status === 401) needPassword('Wrong or missing password.');
       else toast(e.message || 'Something went wrong.');
@@ -289,6 +297,31 @@
       state.busy = false;
       renderFiles();
     }
+  }
+
+  async function runQuick(ready, failed, { task, useSearch }) {
+    const rows = new Array(ready.length);
+    let done = 0;
+    showProgress({ title: 'Getting quick answers', sub: `0 of ${ready.length} answered`, pct: 0 });
+    await pool(ready, 3, async (f, i) => {
+      try {
+        const result = await withRetry(() => api('instant', {
+          method: 'POST',
+          json: { task, useSearch, name: f.name, parts: f.uploaded },
+        }), 4);
+        rows[i] = { name: f.name, ...result };
+      } catch (e) {
+        if (e.status === 401) throw e;
+        rows[i] = { name: f.name, error: e.message || 'Could not process this file.' };
+      }
+      done++;
+      state.results = [...failed, ...rows.filter(Boolean)];
+      showProgress({ title: 'Getting quick answers', sub: `${done} of ${ready.length} answered`, pct: (done / ready.length) * 100 });
+      renderResults('Results');
+    });
+    state.results = [...failed, ...rows];
+    showProgress({ title: 'Finished', sub: `${ready.length - rows.filter((r) => r.error).length} of ${ready.length} files answered`, pct: 100 });
+    renderResults('Results');
   }
 
   // ---- batch polling -----------------------------------------------------
@@ -364,6 +397,8 @@
       const ok = !r.error;
       const body = ok ? r.text : r.error;
       const links = (r.sources || []).filter((s) => /^https?:\/\//i.test(s.uri)).map((s) => el('a', { href: s.uri, target: '_blank', rel: 'noopener noreferrer', text: s.title }));
+      const answer = el('div', { class: 'ans' });
+      renderAnswer(answer, body);
       list.append(
         el('details', { class: 'res' + (ok ? '' : ' bad'), open: openAll ? '' : null },
           el('summary', {},
@@ -371,11 +406,114 @@
             el('span', { class: 'badge', text: ok ? 'Done' : 'Failed' }),
             el('button', { class: 'mini', type: 'button', onclick: (e) => { e.preventDefault(); copyText(body); } }, 'Copy')
           ),
-          el('pre', { class: 'ans', text: body }),
+          answer,
           r.warning ? el('p', { class: 'warn', text: r.warning }) : null,
           links.length ? el('div', { class: 'srcs' }, 'Sources:', links) : null
         )
       );
+    }
+  }
+
+  function renderAnswer(container, text) {
+    const doc = container.ownerDocument;
+    container.replaceChildren();
+    const lines = String(text || '').split(/\r?\n/);
+    let i = 0;
+
+    function inline(parent, value) {
+      const parts = value.split(/(`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*)/g);
+      for (const part of parts) {
+        let node;
+        if (/^`[^`]+`$/.test(part)) {
+          node = doc.createElement('code');
+          node.textContent = part.slice(1, -1);
+        } else if (/^\*\*[^*]+\*\*$/.test(part)) {
+          node = doc.createElement('strong');
+          node.textContent = part.slice(2, -2);
+        } else if (/^\*[^*]+\*$/.test(part)) {
+          node = doc.createElement('em');
+          node.textContent = part.slice(1, -1);
+        } else {
+          node = doc.createTextNode(part);
+        }
+        parent.append(node);
+      }
+    }
+
+    while (i < lines.length) {
+      const line = lines[i];
+      if (!line.trim()) { i++; continue; }
+      const fence = line.match(/^```/);
+      if (fence) {
+        i++;
+        const code = [];
+        while (i < lines.length && !/^```/.test(lines[i])) code.push(lines[i++]);
+        if (i < lines.length) i++;
+        const pre = doc.createElement('pre');
+        pre.className = 'code-block';
+        pre.textContent = code.join('\n');
+        container.append(pre);
+        continue;
+      }
+      const heading = line.match(/^(#{1,6})\s+(.+)$/);
+      if (heading) {
+        const node = doc.createElement(`h${Math.min(4, heading[1].length)}`);
+        inline(node, heading[2]);
+        container.append(node);
+        i++;
+        continue;
+      }
+      const item = line.match(/^\s*([-*+]|\d+[.)])\s+(.+)$/);
+      if (item) {
+        const ordered = /^\d/.test(item[1]);
+        const list = doc.createElement(ordered ? 'ol' : 'ul');
+        while (i < lines.length) {
+          const match = lines[i].match(/^\s*([-*+]|\d+[.)])\s+(.+)$/);
+          if (!match || /^\d/.test(match[1]) !== ordered) break;
+          const li = doc.createElement('li');
+          inline(li, match[2]);
+          list.append(li);
+          i++;
+        }
+        container.append(list);
+        continue;
+      }
+      const paragraph = doc.createElement('p');
+      const textLines = [];
+      while (i < lines.length && lines[i].trim()
+        && !/^```/.test(lines[i])
+        && !/^(#{1,6})\s+/.test(lines[i])
+        && !/^\s*([-*+]|\d+[.)])\s+/.test(lines[i])) {
+        textLines.push(lines[i++]);
+      }
+      inline(paragraph, textLines.join(' '));
+      container.append(paragraph);
+    }
+  }
+
+  function printResults() {
+    if (!state.results.length) return toast('Nothing to save yet.');
+    const previousTitle = document.title;
+    const previousFilter = $('#resFilter').value;
+    document.title = `DocBatch results ${new Date().toISOString().slice(0, 10)}`;
+    document.body.classList.add('printing');
+    $('#resFilter').value = '';
+    renderResults('Results');
+    const details = [...$('#resList').querySelectorAll('details')];
+    const previousOpen = details.map((node) => node.open);
+    details.forEach((node) => { node.open = true; });
+    const cleanup = () => {
+      document.body.classList.remove('printing');
+      document.title = previousTitle;
+      $('#resFilter').value = previousFilter;
+      renderResults('Results');
+      window.removeEventListener('afterprint', cleanup);
+    };
+    window.addEventListener('afterprint', cleanup, { once: true });
+    window.print();
+    if (!('onafterprint' in window)) {
+      details.forEach((node, i) => { node.open = previousOpen[i]; });
+      cleanup();
     }
   }
 
@@ -391,6 +529,8 @@
       download(`docbatch-${stamp}.csv`, '﻿' + lines.join('\r\n'), 'text/csv;charset=utf-8');
     } else if (fmt === 'json') {
       download(`docbatch-${stamp}.json`, JSON.stringify(rows.map((r) => ({ file: r.name, status: r.error ? 'failed' : 'done', answer: r.text || null, error: r.error || null, sources: r.sources || [] })), null, 2), 'application/json');
+    } else if (fmt === 'pdf') {
+      printResults();
     } else if (fmt === 'md') {
       download(`docbatch-${stamp}.md`, rows.map((r) => `## ${r.name}\n\n${r.error ? '**Failed:** ' + r.error : r.text}\n`).join('\n'), 'text/markdown');
     } else {
@@ -454,6 +594,14 @@
     $('#folderInput').addEventListener('change', (e) => { addItems([...e.target.files].map((f) => ({ file: f, name: f.webkitRelativePath || f.name }))); e.target.value = ''; });
     $('#addFolder').addEventListener('click', () => $('#folderInput').click());
     $('#clearFiles').addEventListener('click', () => { if (!state.busy) { state.files = []; renderFiles(); } });
+
+    $('#modeSeg').addEventListener('click', (e) => {
+      const button = e.target.closest('button[data-mode]');
+      if (!button) return;
+      state.mode = button.dataset.mode;
+      for (const option of $('#modeSeg').children) option.classList.toggle('on', option === button);
+      updateRunState();
+    });
 
     $('#pw').value = state.pw;
     $('#pw').addEventListener('input', (e) => { state.pw = e.target.value; try { sessionStorage.setItem(SS_PW, state.pw); } catch { /* ignore */ } });
