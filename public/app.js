@@ -36,6 +36,8 @@
     config: null,
     mode: 'quick',
     job: null,
+    retrying: false,
+    cancelRequested: false,
     results: [],
     pw: sessionStorage.getItem(SS_PW) || '',
     timer: null,
@@ -118,6 +120,26 @@
       }
     }
     throw last;
+  }
+  const retryDelay = (attempt) => Math.min(5000 * (2 ** Math.min(attempt, 6)), 300000);
+  async function submitBatch(items, task, useSearch) {
+    let attempt = 0;
+    while (!state.cancelRequested) {
+      try {
+        return await api('submit', { method: 'POST', json: { task, useSearch, items } });
+      } catch (e) {
+        if (e.status === 401) throw e;
+        attempt++;
+        showProgress({
+          title: 'Still working — retrying submission',
+          sub: `Retry ${attempt} in ${fmtTime(retryDelay(attempt) / 1000)}.`,
+          pct: 0,
+          cancel: !!state.job,
+        });
+        await sleep(retryDelay(attempt));
+      }
+    }
+    return null;
   }
   function loadScript(key) {
     if (!formatterLoads[key]) {
@@ -306,6 +328,8 @@
 
     state.busy = true;
     state.job = null;
+    state.retrying = false;
+    state.cancelRequested = false;
     stopTimer();
     try { localStorage.removeItem(LS_JOB); } catch { /* ignore */ }
     $('#resCard').hidden = true;
@@ -355,11 +379,15 @@
       if (mode === 'quick') {
         await runQuick(ready, failed, { task, useSearch });
       } else {
-        const items = ready.map((f, i) => ({ key: 'f' + i, name: f.name, parts: f.uploaded }));
-        showProgress({ title: 'Creating the batch job…', pct: null });
-        const created = await withRetry(() => api('submit', { method: 'POST', json: { task, useSearch, items } }));
-        state.job = { name: created.name, task, items: items.map(({ key, name }, i) => ({ key, name, id: ready[i].id })), failed, createdAt: Date.now() };
+        const items = ready.map((f, i) => ({ key: 'f' + i, name: f.name, parts: f.uploaded, id: f.id }));
         setStatuses(ready, 'processing');
+        showProgress({ title: 'Creating the batch job…', pct: null });
+        const created = await submitBatch(items, task, useSearch);
+        if (!created) return;
+        state.job = {
+          name: created.name, task, useSearch, allItems: items, activeItems: items,
+          completed: [], failed, retryCount: 0, createdAt: Date.now(),
+        };
         try { localStorage.setItem(LS_JOB, JSON.stringify(state.job)); } catch { /* ignore */ }
         await pollJob();
       }
@@ -379,17 +407,26 @@
     setStatuses(ready, 'processing');
     showProgress({ title: 'Getting quick answers', sub: `0 of ${ready.length} answered`, pct: 0 });
     await pool(ready, 3, async (f, i) => {
-      try {
-        const result = await withRetry(() => api('instant', {
-          method: 'POST',
-          json: { task, useSearch, name: f.name, parts: f.uploaded },
-        }), 4);
-        rows[i] = { name: f.name, ...result };
-        f.status = result.error ? 'failed' : 'processed';
-      } catch (e) {
-        if (e.status === 401) throw e;
-        rows[i] = { name: f.name, error: e.message || 'Could not process this file.' };
-        f.status = 'failed';
+      let attempt = 0;
+      while (!rows[i]) {
+        try {
+          const result = await api('instant', {
+            method: 'POST',
+            json: { task, useSearch, name: f.name, parts: f.uploaded },
+          });
+          if (result.error) throw new Error(result.error);
+          rows[i] = { name: f.name, ...result };
+          f.status = 'processed';
+        } catch (e) {
+          if (e.status === 401) throw e;
+          attempt++;
+          showProgress({
+            title: 'Still processing — retrying',
+            sub: `${done} of ${ready.length} files processed · retry ${attempt} for ${f.name}`,
+            pct: (done / ready.length) * 100,
+          });
+          await sleep(retryDelay(attempt));
+        }
       }
       done++;
       renderFiles();
@@ -404,59 +441,233 @@
 
   // ---- batch polling -----------------------------------------------------
   async function pollJob() {
-    const job = state.job;
+    let job = state.job;
     if (!job) return;
     let delay = 5000;
     const t0 = job.createdAt || Date.now();
     startTimer((s) => `Running for ${fmtTime(s)}`);
     $('#progTitle').textContent = 'Batch job submitted';
-    while (state.job === job) {
+    while (state.job && !state.cancelRequested) {
+      job = state.job;
+      if (job.retryPending) {
+        const created = await submitBatch(job.activeItems, job.task, job.useSearch);
+        if (!created) break;
+        job.name = created.name;
+        job.createdAt = Date.now();
+        job.retryPending = false;
+        state.job = job;
+        try { localStorage.setItem(LS_JOB, JSON.stringify(job)); } catch { /* ignore */ }
+        state.retrying = false;
+        delay = 5000;
+        continue;
+      }
       let st;
       try {
         st = await api('status?name=' + encodeURIComponent(job.name));
       } catch (e) {
         if (e.status === 401) { stopTimer(); needPassword('Enter the access password to continue.'); return; }
-        showProgress({ title: 'Connection hiccup, retrying…', sub: e.message, pct: null, cancel: true });
-        await sleep(delay);
+        job.retryCount = (job.retryCount || 0) + 1;
+        job.retryPending = true;
+        try { localStorage.setItem(LS_JOB, JSON.stringify(job)); } catch { /* ignore */ }
+        state.retrying = true;
+        showProgress({
+          title: 'Still processing — reconnecting',
+          sub: 'Checking the job again shortly.',
+          pct: getJobPercent(job),
+          cancel: true,
+        });
+        await sleep(Math.max(delay, retryDelay(job.retryCount)));
         continue;
       }
-      const label = STATE_LABEL[st.stateName] || st.stateName || 'Waiting';
+      const hasUnfinishedResults = st.stateName === 'SUCCEEDED'
+        && (!Array.isArray(st.results) || st.results.some((result) => result.error || !result.text));
+      const retryingTerminal = ['FAILED', 'EXPIRED'].includes(st.stateName) || hasUnfinishedResults;
+      const label = retryingTerminal
+        ? 'Still processing — retrying'
+        : STATE_LABEL[st.stateName] || st.stateName || 'Waiting';
       const s = st.stats;
-      const complete = s ? (s.ok || 0) + (s.failed || 0) : 0;
-      const pct = s && s.total ? (complete / s.total) * 100 : null;
-      const count = s && s.total ? `${complete} of ${s.total} files processed` : '';
-      showProgress({ title: label, sub: count || 'Waiting for processing updates…', pct: st.stateName === 'SUCCEEDED' ? 100 : pct, meta: 'Safe to close this tab; reopen it to get the results.', cancel: !st.terminal });
-      if (!count) startTimer((sec) => `Running for ${fmtTime(Math.max(sec, Math.floor((Date.now() - t0) / 1000)))}`);
-      else stopTimer();
-      if (st.terminal) { stopTimer(); finishJob(st); return; }
+      const activeComplete = s ? (s.ok || 0) : 0;
+      const complete = (job.completed || []).length + activeComplete;
+      const total = (job.allItems || job.activeItems || []).length;
+      const resultComplete = st.stateName === 'SUCCEEDED' && Array.isArray(st.results)
+        ? st.results.filter((result) => !result.error && result.text).length
+        : activeComplete;
+      const pct = total ? ((job.completed || []).length + resultComplete) / total * 100 : null;
+      showProgress({
+        title: label,
+        sub: `${complete} of ${total} files processed`,
+        pct,
+        meta: 'Safe to close this tab; reopen it to get the results.',
+        cancel: !st.terminal,
+      });
+      if (st.terminal) {
+        if (st.stateName === 'CANCELLED') {
+          stopTimer();
+          finishJob({ stateName: 'CANCELLED', error: 'Job cancelled.' });
+          return;
+        }
+        if (st.stateName === 'EXPIRED') {
+          if (!await refreshExpiredItems(job)) {
+            stopTimer();
+            finishJob({ stateName: 'EXPIRED', error: 'The source files are no longer available in this tab to restart processing.' });
+            return;
+          }
+        } else if (st.stateName === 'SUCCEEDED' && await collectBatchResults(job, st)) {
+          stopTimer();
+          return;
+        }
+        job.retryCount = (job.retryCount || 0) + 1;
+        showProgress({
+          title: 'Still processing — retrying',
+          sub: `Retrying ${job.activeItems.length} unfinished file${job.activeItems.length === 1 ? '' : 's'} in ${fmtTime(retryDelay(job.retryCount) / 1000)}.`,
+          pct: getJobPercent(job),
+          meta: 'Completed files are kept; unfinished files are retried automatically.',
+          cancel: true,
+        });
+        await sleep(retryDelay(job.retryCount));
+        if (state.cancelRequested) break;
+        const created = await submitBatch(job.activeItems, job.task, job.useSearch);
+        if (!created) break;
+        job.name = created.name;
+        job.createdAt = Date.now();
+        job.retryPending = false;
+        state.job = job;
+        state.retrying = false;
+        try { localStorage.setItem(LS_JOB, JSON.stringify(job)); } catch { /* ignore */ }
+        delay = 5000;
+        continue;
+      }
       await sleep(delay);
       delay = Math.min(Math.round(delay * 1.25), 30000);
     }
+    stopTimer();
+    if (state.cancelRequested) {
+      for (const item of state.job?.activeItems || []) {
+        const file = state.files.find((entry) => entry.id === item.id);
+        if (file) file.status = 'cancelled';
+      }
+      state.job = null;
+      state.retrying = false;
+      try { localStorage.removeItem(LS_JOB); } catch { /* ignore */ }
+      renderFiles();
+      showProgress({ title: 'Cancelled', sub: 'Automatic retries stopped.', pct: getJobPercent(job) });
+    }
+  }
+
+  function getJobPercent(job) {
+    const total = (job.allItems || job.activeItems || []).length;
+    const done = (job.completed || []).length;
+    return total ? (done / total) * 100 : 0;
+  }
+
+  async function refreshExpiredItems(job) {
+    for (const item of job.activeItems || []) {
+      const file = state.files.find((entry) => entry.id === item.id);
+      if (!file || !file.file) return false;
+      let attempt = 0;
+      while (true) {
+        try {
+          const prep = await window.Extract.prepare(file.file, file.name);
+          const parts = [];
+          for (const blob of prep.blobs) {
+            const uploaded = await withRetry(() => uploadFile(blob));
+            parts.push({ uri: uploaded.uri, mimeType: uploaded.mimeType || blob.mime });
+          }
+          item.parts = parts;
+          file.uploaded = parts;
+          file.uploadedAt = Date.now();
+          break;
+        } catch (error) {
+          if (error.status === 401) throw error;
+          attempt++;
+          showProgress({
+            title: 'Still processing — retrying file upload',
+            sub: `Retry ${attempt} for ${file.name} in ${fmtTime(retryDelay(attempt) / 1000)}.`,
+            pct: getJobPercent(job),
+            cancel: true,
+          });
+          await sleep(retryDelay(attempt));
+        }
+      }
+    }
+    return true;
+  }
+
+  async function collectBatchResults(job, st) {
+    const byKey = new Map((job.activeItems || []).map((item, i) => [item.key, { ...item, i }]));
+    const responseByKey = new Map();
+    for (const response of st.results || []) {
+      const item = (response.key && byKey.get(response.key)) || (job.activeItems || [])[response.index];
+      if (item) responseByKey.set(item.key, response);
+    }
+    const retry = [];
+    const completed = job.completed || (job.completed = []);
+    for (const item of job.activeItems || []) {
+      const response = responseByKey.get(item.key);
+      if (response && !response.error && response.text) {
+        const previous = completed.findIndex((result) => result.key === item.key);
+        const result = { key: item.key, name: item.name, id: item.id, text: response.text, warning: response.warning, sources: response.sources };
+        if (previous < 0) completed.push(result);
+        else completed[previous] = result;
+        const file = state.files.find((entry) => entry.id === item.id);
+        if (file) file.status = 'processed';
+      } else {
+        retry.push(item);
+        const file = state.files.find((entry) => entry.id === item.id);
+        if (file) file.status = 'processing';
+      }
+    }
+    renderFiles();
+    if (retry.length) {
+      job.activeItems = retry;
+      return false;
+    }
+    job.activeItems = [];
+    const completeResults = completed.map((result, index) => ({
+      key: result.key,
+      index: (job.allItems || []).findIndex((item) => item.key === result.key),
+      text: result.text,
+      warning: result.warning,
+      sources: result.sources,
+    }));
+    finishJob({ stateName: 'SUCCEEDED', results: completeResults });
+    return true;
   }
 
   function finishJob(st) {
     const job = state.job;
     if (st.stateName !== 'SUCCEEDED' || !st.results) {
-      for (const item of job.items) {
+      const affected = st.stateName === 'CANCELLED'
+        ? job.activeItems || job.allItems || job.items || []
+        : job.allItems || job.items || [];
+      for (const item of affected) {
         const file = state.files.find((entry) => entry.id === item.id);
         if (file) file.status = st.stateName === 'CANCELLED' ? 'cancelled' : 'failed';
       }
       renderFiles();
+      if (st.stateName === 'CANCELLED' && job.completed?.length) {
+        state.results = [
+          ...(job.failed || []).map((item) => ({ name: item.name, error: item.error })),
+          ...job.completed.map((item) => ({ ...item })),
+        ];
+        renderResults('Completed results');
+      }
       showProgress({ title: STATE_LABEL[st.stateName] || 'Finished', sub: st.error || '', pct: 100 });
       if (st.error) toast(st.error);
       return;
     }
-    const byKey = new Map(job.items.map((it, i) => [it.key, { ...it, i }]));
+    const items = job.allItems || job.items || [];
+    const byKey = new Map(items.map((it, i) => [it.key, { ...it, i }]));
     const rows = [];
     const completed = new Set();
     for (const r of st.results) {
-      const it = (r.key && byKey.get(r.key)) || job.items[r.index] || { name: 'file ' + (r.index + 1) };
+      const it = (r.key && byKey.get(r.key)) || items[r.index] || { name: 'file ' + (r.index + 1) };
       if (it.key) completed.add(it.key);
       const file = state.files.find((entry) => entry.id === it.id);
       if (file) file.status = r.error ? 'failed' : 'processed';
       rows.push({ name: it.name, text: r.text, error: r.error, warning: r.warning, sources: r.sources, _o: (byKey.get(r.key) || {}).i ?? r.index });
     }
-    for (const item of job.items) {
+    for (const item of items) {
       if (!completed.has(item.key)) {
         const file = state.files.find((entry) => entry.id === item.id);
         if (file) file.status = 'failed';
@@ -472,6 +683,11 @@
 
   async function cancelJob() {
     if (!state.job) return;
+    if (state.retrying) {
+      state.cancelRequested = true;
+      toast('Stopping automatic retries…', 'info');
+      return;
+    }
     try {
       await api('cancel', { method: 'POST', json: { name: state.job.name } });
       toast('Cancel requested. Waiting for confirmation…', 'info');
@@ -645,8 +861,15 @@
   function resumeSavedJob() {
     let saved = null;
     try { saved = JSON.parse(localStorage.getItem(LS_JOB) || 'null'); } catch { /* ignore */ }
-    if (!saved || !saved.name || !Array.isArray(saved.items)) return;
+    if (!saved || !saved.name || (!Array.isArray(saved.allItems) && !Array.isArray(saved.items))) return;
+    if (!saved.allItems && Array.isArray(saved.items)) {
+      saved.allItems = saved.items;
+      saved.activeItems = saved.items;
+      saved.completed = [];
+      saved.retryCount = 0;
+    }
     state.job = saved;
+    state.retrying = !!saved.retryPending;
     state.busy = true;
     renderFiles();
     showProgress({ title: 'Restoring your last job…', pct: null, cancel: true });
