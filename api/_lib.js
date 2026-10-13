@@ -12,7 +12,11 @@ const MAX_PARTS_PER_ITEM = 45;
 // Long answers are continued automatically, so the model should never stop to ask.
 const FINISH = 'Complete the whole task in one answer, in full detail. Never stop partway, never shorten the result to save space, and never ask whether you should continue.';
 const SYSTEM = `You process one document at a time. Do exactly what the user's task says, for this one document only. Use only what is in the document: if something is not stated, say so or leave it blank. Never invent facts, names or contact details. ${FINISH}`;
-const SEARCH_NOTE = `\nYou also have Google Search. Use it only when the task needs outside information, and keep it to the few searches you need. Research companies and public facts; do not dig into private individuals' personal lives. Say when you are unsure.`;
+// Research on many items is spread over several turns; the model ends a turn with MORE to be called again.
+const MORE = '[[CONTINUE]]';
+const ITEMS_PER_TURN = 8;
+const SEARCH_NOTE = `\nYou also have Google Search. Use it only when the task needs outside information, and keep it to the few searches you need. Research companies and public facts; do not dig into private individuals' personal lives. Say when you are unsure.
+One turn allows only a limited number of searches, and a turn that runs out of them is lost. When the task needs research on many items, do not try to cover them all in one turn: research only the next items in order, never more than ${ITEMS_PER_TURN} in a turn however many remain, write out their finished results in the final output format, then end the turn with a last line containing only ${MORE}. You will be called again automatically with your answer so far and must carry on from the next item. Never fill in an item from memory to go faster: every item gets its own search. Do not write notes, progress reports or summaries between turns. Leave out ${MORE} only when the entire task is finished.`;
 
 function httpError(status, message) {
   const e = new Error(message);
@@ -216,7 +220,7 @@ function normalize(r, { keepSpace = false } = {}) {
 }
 
 module.exports = {
-  BASE, MAX_UPLOAD_CHUNK_BYTES, MAX_FILE_BYTES, SYSTEM, SEARCH_NOTE, FINISH,
+  BASE, MAX_UPLOAD_CHUNK_BYTES, MAX_FILE_BYTES, SYSTEM, SEARCH_NOTE, FINISH, MORE, ITEMS_PER_TURN,
   httpError, allowedModels, apiKey, checkAuth, route, gemini, geminiStream,
   cleanTask, cleanModel, cleanItem, buildRequest, normalize,
 };

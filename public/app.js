@@ -112,7 +112,7 @@
   }
   const retryDelay = (attempt) => Math.min(5000 * (2 ** Math.min(attempt, 6)), 300000);
   // A long answer is fetched in several pieces; this caps how many before giving up.
-  const MAX_PIECES = 40;
+  const MAX_PIECES = 100;
   const STOPPED = new Error('Stopped.');
   // Waits before a retry, ending early when the run is stopped.
   async function pause(ms) {
@@ -125,16 +125,22 @@
     let text = '';
     const sources = [];
     let attempt = 0;
+    let slower = false; // set when a turn ran out of searches, so the next ones take smaller steps
     for (let pieces = 1; ; pieces++) {
       let result;
       while (!result) {
         if (state.cancelRequested) throw STOPPED;
         try {
-          result = await api('instant', { method: 'POST', json: text ? { ...payload, prior: text } : payload, signal: state.abort.signal });
+          result = await api('instant', { method: 'POST', json: { ...payload, ...(text ? { prior: text } : {}), ...(slower ? { slower } : {}) }, signal: state.abort.signal });
           if (result.error) throw new Error(result.error);
         } catch (e) {
           if (state.cancelRequested) throw STOPPED;
           if (e.status === 401) throw e;
+          // Retrying cannot fix a rejected request (bad input, no credit left): keep what was written and stop.
+          if (e.status >= 400 && e.status < 500 && e.status !== 408 && e.status !== 429) {
+            if (!text.trim()) throw e;
+            return { text: text.trim(), warning: `Stopped before the end: ${e.message}`, sources };
+          }
           result = null;
           attempt++;
           note(`retry ${attempt}`);
@@ -142,13 +148,14 @@
         }
       }
       attempt = 0;
+      if (result.slower) slower = true;
       text += result.text;
       for (const source of result.sources || []) {
         if (!sources.some((seen) => seen.uri === source.uri)) sources.push(source);
       }
       if (!result.incomplete) return { text: text.trim(), warning: result.warning, sources };
       if (pieces >= MAX_PIECES) return { text: text.trim(), warning: 'This answer was too long to finish and stops early.', sources };
-      note('continuing a long answer');
+      note('continuing a long task');
     }
   }
   function stopRun() {
@@ -462,7 +469,7 @@
     let done = 0;
     const progress = (extra) => showProgress({
       title: 'Getting answers',
-      sub: `${done} of ${ready.length} answered` + (extra ? ` · ${extra}` : ''),
+      sub: `${done} of ${ready.length} done` + (extra ? ` · ${extra}` : ''),
       pct: (done / ready.length) * 100,
       cancel: true,
     });
@@ -474,8 +481,10 @@
         rows[i] = { name: f.name, ...result };
         f.status = 'processed';
       } catch (e) {
-        if (e !== STOPPED) throw e;
-        return;
+        if (e === STOPPED) return;
+        if (e.status === 401) throw e;
+        rows[i] = { name: f.name, error: e.message || 'Could not get an answer.' };
+        f.status = 'failed';
       }
       done++;
       renderFiles();
@@ -484,11 +493,12 @@
       renderResults('Results');
     });
     state.results = [...failed, ...rows.filter(Boolean)];
+    const answered = rows.filter((r) => r && !r.error).length;
     if (state.cancelRequested) {
-      for (const f of ready) if (f.status !== 'processed') f.status = 'cancelled';
-      showProgress({ title: 'Stopped', sub: `${done} of ${ready.length} files answered`, pct: (done / ready.length) * 100 });
+      for (const f of ready) if (f.status === 'processing') f.status = 'cancelled';
+      showProgress({ title: 'Stopped', sub: `${answered} of ${ready.length} files answered`, pct: (done / ready.length) * 100 });
     } else {
-      showProgress({ title: 'Finished', sub: `${done} of ${ready.length} files answered`, pct: 100 });
+      showProgress({ title: 'Finished', sub: `${answered} of ${ready.length} files answered`, pct: 100 });
     }
     if (state.results.length) renderResults('Results');
   }

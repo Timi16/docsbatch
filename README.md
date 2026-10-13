@@ -31,9 +31,13 @@ answer cut off? ask again   ->  /api/instant (with the text so far) ->  streamGe
 Vercel limits a request to about 4.5 MB, so files are uploaded in 4 MB chunks to Google's Files API.
 Each request only references the uploaded files, so it stays tiny however big the documents are.
 
-A function may run for 60 seconds, so `/api/instant` streams the answer and stops reading after about 40 seconds
-(or when the model hits its output limit). The page then sends back the text it has and asks for the rest, and
-repeats until the answer is finished. Nobody has to type "continue".
+An answer that does not fit in one request is continued automatically; nobody has to type "continue":
+
+- With web search on, one request can only make a limited number of searches (Google ends it with
+  `TOO_MANY_TOOL_CALLS` and no answer). So for research on many items, such as a list of leads, the model does
+  8 items per turn and ends the turn with `[[CONTINUE]]`. The page then sends back the answer so far and asks for
+  the next items, up to 100 turns per file.
+- The same happens when the model hits its output limit or the function gets close to its 300-second limit.
 
 ## Formats
 
@@ -59,7 +63,8 @@ audio/video over 20 MB.
   Extracted text and spreadsheets are truncated to about 4 MB.
 - **150 files per run**, answered three at a time.
 - Failed requests are retried automatically with increasing delays, up to every five minutes, until they succeed
-  or you press **Stop**. Answers that were already finished are kept. Keep the page open while a run is going.
+  or you press **Stop**. Requests Google rejects outright (for example when the key has no credit left) are not
+  retried: the file keeps what was written so far and shows the reason. Answers that were already finished are kept. Keep the page open while a run is going.
   After a run, use **Run previous files again** to repeat it with the same prompt and options while the uploaded
   copies are available (up to 40 hours); this shortcut lasts only in the current tab.
 - Uploaded files are deleted by Google after 48 hours.
@@ -75,5 +80,5 @@ public/style.css    styles
 public/extract.js   reads any file type in the browser
 public/app.js       UI, upload, live answers, results, downloads
 api/*.js            serverless functions (key stays here)
-vercel.json         serves public/, 60 s function limit
+vercel.json         serves public/, 300 s function limit
 ```
