@@ -39,6 +39,7 @@
     retrying: false,
     cancelRequested: false,
     results: [],
+    lastRun: null,
     pw: sessionStorage.getItem(SS_PW) || '',
     timer: null,
     nextId: 1,
@@ -312,6 +313,9 @@
     const btn = $('#runBtn');
     btn.disabled = state.busy || !state.files.length;
     btn.textContent = state.busy ? 'Working…' : 'Run on all files';
+    const rerunBtn = $('#rerunBtn');
+    rerunBtn.hidden = !state.lastRun;
+    rerunBtn.disabled = state.busy;
     $('#runHint').textContent = state.mode === 'batch'
       ? 'Batch jobs run in the background and may take up to an hour.'
       : 'Quick mode returns live answers and works best for a few files.';
@@ -375,22 +379,68 @@
       const ready = state.files.filter((f) => f.status === 'ready');
       const failed = state.files.filter((f) => f.status === 'failed').map((f) => ({ name: f.name, error: f.error }));
       if (!ready.length) throw new Error('None of the files could be read. See the red messages above.');
+      state.lastRun = {
+        files: ready.map((f) => ({
+          id: f.id,
+          name: f.name,
+          uploaded: f.uploaded.map((part) => ({ ...part })),
+          uploadedAt: f.uploadedAt,
+        })),
+        task,
+        useSearch,
+        mode,
+        expiresAt: Math.min(...ready.map((f) => f.uploadedAt + 40 * 3600 * 1000)),
+      };
+      renderFiles();
+      await executePrepared(ready, failed, { task, useSearch, mode });
+    } catch (e) {
+      if (e.status === 401) needPassword('Wrong or missing password.');
+      else toast(e.message || 'Something went wrong.');
+      $('#progCard').hidden = true;
+    } finally {
+      state.busy = false;
+      renderFiles();
+    }
+  }
 
-      if (mode === 'quick') {
-        await runQuick(ready, failed, { task, useSearch });
-      } else {
-        const items = ready.map((f, i) => ({ key: 'f' + i, name: f.name, parts: f.uploaded, id: f.id }));
-        setStatuses(ready, 'processing');
-        showProgress({ title: 'Creating the batch job…', pct: null });
-        const created = await submitBatch(items, task, useSearch);
-        if (!created) return;
-        state.job = {
-          name: created.name, task, useSearch, allItems: items, activeItems: items,
-          completed: [], failed, retryCount: 0, createdAt: Date.now(),
-        };
-        try { localStorage.setItem(LS_JOB, JSON.stringify(state.job)); } catch { /* ignore */ }
-        await pollJob();
-      }
+  async function executePrepared(ready, failed, { task, useSearch, mode }) {
+    if (mode === 'quick') {
+      await runQuick(ready, failed, { task, useSearch });
+      return;
+    }
+    const items = ready.map((f, i) => ({ key: 'f' + i, name: f.name, parts: f.uploaded, id: f.id }));
+    setStatuses(ready, 'processing');
+    showProgress({ title: 'Creating the batch job…', pct: null });
+    const created = await submitBatch(items, task, useSearch);
+    if (!created) return;
+    state.job = {
+      name: created.name, task, useSearch, allItems: items, activeItems: items,
+      completed: [], failed, retryCount: 0, createdAt: Date.now(),
+    };
+    try { localStorage.setItem(LS_JOB, JSON.stringify(state.job)); } catch { /* ignore */ }
+    await pollJob();
+  }
+
+  async function rerun() {
+    const previous = state.lastRun;
+    if (state.busy || !previous) return;
+    if (Date.now() >= previous.expiresAt) {
+      toast('The previous upload has expired. Add the files again to rerun them.');
+      return;
+    }
+    if (state.config && state.config.passwordRequired && !state.pw) return needPassword();
+    state.busy = true;
+    state.job = null;
+    state.retrying = false;
+    state.cancelRequested = false;
+    stopTimer();
+    try { localStorage.removeItem(LS_JOB); } catch { /* ignore */ }
+    $('#resCard').hidden = true;
+    state.results = [];
+    renderFiles();
+    try {
+      const files = previous.files.map((saved) => state.files.find((file) => file.id === saved.id) || saved);
+      await executePrepared(files, [], previous);
     } catch (e) {
       if (e.status === 401) needPassword('Wrong or missing password.');
       else toast(e.message || 'Something went wrong.');
@@ -910,6 +960,7 @@
     $('#pw').addEventListener('keydown', (e) => { if (e.key === 'Enter') run(); });
 
     $('#runBtn').addEventListener('click', run);
+    $('#rerunBtn').addEventListener('click', rerun);
     $('#cancelBtn').addEventListener('click', cancelJob);
     $('#resFilter').addEventListener('input', () => renderResults($('#resTitle').textContent));
     $('#copyAll').addEventListener('click', () => copyText(state.results.map((r) => `${r.name}\n${r.error ? 'FAILED: ' + r.error : r.text}`).join('\n\n---\n\n')));

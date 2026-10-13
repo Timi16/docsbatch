@@ -56,7 +56,9 @@ audio/video over 20 MB.
 - Batch jobs are asynchronous and may take up to an hour. Failed processing jobs and individual files are retried
   automatically with increasing delays, up to every five minutes, until they succeed. Retries are coordinated by the
   browser, so keep the page open or reopen it to resume retries. Use Quick mode for live responses on a few files.
-  The page stores the batch job in your browser. Google keeps results for 6 weeks.
+  The page stores the batch job in your browser. After a run, use **Run previous files again** to repeat it with the
+  same prompt and options while the uploaded copies are available (up to 40 hours); this shortcut lasts only in the
+  current tab. Google keeps results for 6 weeks.
 - Uploaded files are deleted by Google after 48 hours.
 - Free-tier keys: Google may use submitted content to improve its products. Use a billing-enabled key for private documents.
 - "Allow web search" adds grounded search to each request and is billed separately by Google. It is enabled by default.
