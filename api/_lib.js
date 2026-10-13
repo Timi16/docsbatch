@@ -145,7 +145,7 @@ function normalize(r) {
 }
 
 module.exports = {
-  BASE, MAX_UPLOAD_CHUNK_BYTES, MAX_FILE_BYTES, MAX_ITEMS, SYSTEM,
+  BASE, MAX_UPLOAD_CHUNK_BYTES, MAX_FILE_BYTES, MAX_ITEMS, SYSTEM, SEARCH_NOTE,
   httpError, allowedModels, apiKey, checkAuth, route, gemini,
   cleanTask, cleanModel, cleanItem, buildRequest, normalize,
 };

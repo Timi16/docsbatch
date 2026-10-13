@@ -1,7 +1,8 @@
 # DocBatch
 
-Drop files, type what you want done, get one answer per file. Choose quick live answers for a few files
-or asynchronous batch processing for larger runs. Your processing API key lives only in Vercel
+Drop files, type what you want done, get one answer per file. You can also send a message without uploading files
+for a quick live answer. Choose quick live answers for a few files or asynchronous batch processing for larger runs.
+Your processing API key lives only in Vercel
 environment variables, never in the browser.
 
 ## Deploy (about 5 minutes)
@@ -24,7 +25,7 @@ browser                         Vercel functions (hold the key)          Google
 read each file, make text   ->  /api/upload  (4 MB chunks)           ->  Files API
 create batch from file refs -> /api/submit                          -> Batch API
 poll every few seconds      -> /api/status (returns answers)       <- Batch API
-(quick mode)                 -> /api/instant (one live call per file)-> generateContent
+(quick mode)                 -> /api/instant (per file or message)  -> generateContent
 ```
 
 Vercel limits a request to about 4.5 MB, so files are uploaded in 4 MB chunks to Google's Files API.

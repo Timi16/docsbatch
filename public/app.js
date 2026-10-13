@@ -311,12 +311,18 @@
 
   function updateRunState() {
     const btn = $('#runBtn');
-    btn.disabled = state.busy || !state.files.length;
-    btn.textContent = state.busy ? 'Working…' : 'Run on all files';
+    btn.disabled = state.busy;
+    btn.textContent = state.busy ? 'Working…' : state.files.length ? 'Run on all files' : 'Send message';
+    $('#taskLabel').textContent = state.files.length ? 'What should be done with each file?' : 'Type a message or ask a question';
+    $('#task').placeholder = state.files.length
+      ? 'e.g. Summarize this in 3 bullets, or: extract every name, email and phone number as JSON'
+      : 'Type a message or ask a question…';
     const rerunBtn = $('#rerunBtn');
     rerunBtn.hidden = !state.lastRun;
     rerunBtn.disabled = state.busy;
-    $('#runHint').textContent = state.mode === 'batch'
+    $('#runHint').textContent = !state.files.length
+      ? 'Messages get a quick live answer. Add files to process documents.'
+      : state.mode === 'batch'
       ? 'Batch jobs run in the background and may take up to an hour.'
       : 'Quick mode returns live answers and works best for a few files.';
   }
@@ -326,7 +332,6 @@
     if (state.busy) return;
     const task = $('#task').value.trim();
     if (!task) return toast('Type what you want done with each file.');
-    if (!state.files.length) return toast('Add at least one file.');
     if (state.config && state.config.passwordRequired && !state.pw) return needPassword();
     try { localStorage.setItem(LS_TASK, task); } catch { /* ignore */ }
 
@@ -345,6 +350,10 @@
     const mode = state.mode;
 
     try {
+      if (!state.files.length) {
+        await runMessage(task, useSearch);
+        return;
+      }
       // Phase 1: read every file in the browser and upload it for processing.
       const total = state.files.length;
       let finished = 0;
@@ -400,6 +409,38 @@
     } finally {
       state.busy = false;
       renderFiles();
+    }
+  }
+
+  async function runMessage(message, useSearch) {
+    let attempt = 0;
+    showProgress({ title: 'Sending your message', sub: 'Getting a live answer…', pct: null });
+    while (true) {
+      try {
+        const result = await api('instant', {
+          method: 'POST',
+          json: { message, useSearch },
+        });
+        if (result.error) throw new Error(result.error);
+        state.results = [{
+          name: 'Message',
+          text: `**You:** ${message}\n\n**Assistant:** ${result.text}`,
+          warning: result.warning,
+          sources: result.sources,
+        }];
+        showProgress({ title: 'Finished', sub: 'Your message has been answered.', pct: 100 });
+        renderResults('Reply');
+        return;
+      } catch (e) {
+        if (e.status === 401) throw e;
+        attempt++;
+        showProgress({
+          title: 'Still processing — retrying',
+          sub: `Retry ${attempt} for your message.`,
+          pct: null,
+        });
+        await sleep(retryDelay(attempt));
+      }
     }
   }
 
