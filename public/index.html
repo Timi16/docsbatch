@@ -24,7 +24,7 @@
 
     <section class="hero">
       <h1>Drop files. Say what to do.<br><em>Get an answer for each one.</em></h1>
-      <p>PDFs, Word, Excel, PowerPoint, images, scans, emails, code, zips and more. Get a quick answer for a few files or run a batch for larger jobs.</p>
+      <p>PDFs, Word, Excel, PowerPoint, text files (.txt), images, scans, emails, code, zips and more. Every file gets a live answer, and long answers are finished automatically.</p>
     </section>
 
     <section class="card" id="filesCard">
@@ -51,13 +51,6 @@
       <div class="chips" id="presets" aria-label="Example instructions"></div>
 
       <div class="opts">
-        <div class="opt">
-          <label id="modeLbl">Processing speed</label>
-          <div class="seg" id="modeSeg" role="group" aria-labelledby="modeLbl">
-            <button type="button" data-mode="quick" class="on">Quick <small>live answers · best for a few files</small></button>
-            <button type="button" data-mode="batch">Batch <small>larger runs · automatic retries</small></button>
-          </div>
-        </div>
         <label class="check"><input type="checkbox" id="useSearch" checked> Allow web search</label>
       </div>
 
@@ -80,7 +73,7 @@
           <div class="prog-sub" id="progSub"></div>
         </div>
         <strong class="prog-pct" id="progPct" hidden></strong>
-        <button type="button" class="ghost" id="cancelBtn" hidden>Cancel job</button>
+        <button type="button" class="ghost" id="cancelBtn" hidden>Stop</button>
       </div>
       <div class="bar" id="progBar"><i></i></div>
       <div class="prog-meta" id="progMeta"></div>
@@ -108,7 +101,7 @@
     </section>
 
     <footer>
-      <p>Your files are read in your browser; files and messages are sent to Google for processing. Quick mode requests live answers; batch jobs may take up to an hour. Uploaded files are deleted after 48 hours.</p>
+      <p>Your files are read in your browser; files and messages are sent to Google for processing. Uploaded files are deleted after 48 hours.</p>
     </footer>
   </main>
 

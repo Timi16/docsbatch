@@ -101,13 +101,7 @@ textarea:focus, select:focus, input:focus { outline: 2px solid color-mix(in srgb
 .chips button:hover { color: var(--text); border-color: var(--accent); }
 
 .opts { display: flex; flex-wrap: wrap; gap: 14px 18px; align-items: flex-start; margin-top: 14px; }
-.opt { min-width: 190px; flex: 1; }
-.opt > label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px; }
-.seg { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; padding: 4px; background: var(--panel2); border: 1px solid var(--line); border-radius: 12px; }
-.seg button { background: none; border: 0; color: var(--muted); font: inherit; font-weight: 600; padding: 6px 8px; border-radius: 9px; cursor: pointer; text-align: center; }
-.seg button small { display: block; font-weight: 400; font-size: 11px; opacity: .85; }
-.seg button.on { background: var(--accent); color: #fff; }
-.check { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 14px; margin-top: 27px; cursor: pointer; }
+.check { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 14px; cursor: pointer; }
 .check input { accent-color: var(--accent); width: 16px; height: 16px; }
 .pwrow { margin-top: 14px; }
 .pwrow label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px; }

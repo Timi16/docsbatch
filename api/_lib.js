@@ -7,10 +7,11 @@ const DEFAULT_MODEL = 'gemini-3.8-flash';
 const DEFAULT_MODELS = [DEFAULT_MODEL, 'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite'];
 const MAX_UPLOAD_CHUNK_BYTES = Math.floor(4.4 * 1024 * 1024); // Vercel request bodies are capped at ~4.5 MB
 const MAX_FILE_BYTES = 20 * 1024 * 1024;
-const MAX_ITEMS = 150;
 const MAX_PARTS_PER_ITEM = 45;
 
-const SYSTEM = `You process one document at a time. Do exactly what the user's task says, for this one document only. Use only what is in the document: if something is not stated, say so or leave it blank. Never invent facts, names or contact details.`;
+// Long answers are continued automatically, so the model should never stop to ask.
+const FINISH = 'Complete the whole task in one answer, in full detail. Never stop partway, never shorten the result to save space, and never ask whether you should continue.';
+const SYSTEM = `You process one document at a time. Do exactly what the user's task says, for this one document only. Use only what is in the document: if something is not stated, say so or leave it blank. Never invent facts, names or contact details. ${FINISH}`;
 const SEARCH_NOTE = `\nYou also have Google Search. Use it only when the task needs outside information, and keep it to the few searches you need. Research companies and public facts; do not dig into private individuals' personal lives. Say when you are unsure.`;
 
 function httpError(status, message) {
@@ -72,13 +73,82 @@ async function gemini(path, { method = 'GET', json, headers = {}, body } = {}) {
   const text = await r.text();
   let data = {};
   try { data = text ? JSON.parse(text) : {}; } catch { data = { raw: text.slice(0, 300) }; }
-  if (!r.ok) {
-    const msg = (data && data.error && data.error.message) || `Processing API error (${r.status})`;
-    // Never pass 401/403 from Google through: the browser would think the APP password is wrong.
-    const status = r.status === 429 ? 429 : r.status >= 500 || r.status === 401 || r.status === 403 ? 502 : r.status;
-    throw httpError(status, msg);
-  }
+  if (!r.ok) throw upstreamError(r.status, data);
   return { data, headers: r.headers };
+}
+
+function upstreamError(status, data) {
+  const msg = (data && data.error && data.error.message) || `Processing API error (${status})`;
+  // Never pass 401/403 from Google through: the browser would think the APP password is wrong.
+  return httpError(status === 429 ? 429 : status >= 500 || status === 401 || status === 403 ? 502 : status, msg);
+}
+
+const hasText = (chunk) => ((chunk.candidates && chunk.candidates[0] && chunk.candidates[0].content && chunk.candidates[0].content.parts) || [])
+  .some((p) => typeof p.text === 'string' && p.text && !p.thought);
+
+// Streams one answer so a long one can be cut before the function times out. Reading stops at softMs
+// once some of the answer has arrived, or at hardMs regardless. Returns one merged response.
+async function geminiStream(path, json, { softMs, hardMs }) {
+  const ctrl = new AbortController();
+  const started = Date.now();
+  const hard = setTimeout(() => ctrl.abort(), hardMs);
+  const chunks = [];
+  let gotText = false;
+  let timedOut = false;
+  try {
+    const r = await fetch(`${BASE}${path}?alt=sse`, {
+      method: 'POST',
+      headers: { 'x-goog-api-key': apiKey(), 'Content-Type': 'application/json' },
+      body: JSON.stringify(json),
+      signal: ctrl.signal,
+    });
+    if (!r.ok) {
+      const text = await r.text();
+      let data = {};
+      try { data = text ? JSON.parse(text) : {}; } catch { /* use the status */ }
+      throw upstreamError(r.status, data);
+    }
+    const decoder = new TextDecoder();
+    let buf = '';
+    for await (const piece of r.body) {
+      buf += decoder.decode(piece, { stream: true });
+      let nl;
+      while ((nl = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, nl).trim();
+        buf = buf.slice(nl + 1);
+        if (!line.startsWith('data:')) continue;
+        try {
+          const chunk = JSON.parse(line.slice(5));
+          chunks.push(chunk);
+          gotText = gotText || hasText(chunk);
+        } catch { /* ignore a malformed event */ }
+      }
+      if (gotText && Date.now() - started > softMs) {
+        timedOut = true;
+        ctrl.abort();
+        break;
+      }
+    }
+  } catch (e) {
+    if (!ctrl.signal.aborted) throw e;
+    timedOut = true;
+  } finally {
+    clearTimeout(hard);
+  }
+
+  const parts = [];
+  const groundingChunks = [];
+  let finishReason;
+  let promptFeedback;
+  for (const chunk of chunks) {
+    if (chunk.promptFeedback) promptFeedback = chunk.promptFeedback;
+    const c = chunk.candidates && chunk.candidates[0];
+    if (!c) continue;
+    parts.push(...((c.content && c.content.parts) || []));
+    if (c.finishReason) finishReason = c.finishReason;
+    groundingChunks.push(...((c.groundingMetadata && c.groundingMetadata.groundingChunks) || []));
+  }
+  return { data: { promptFeedback, candidates: [{ content: { parts }, finishReason, groundingMetadata: { groundingChunks } }] }, finishReason, timedOut };
 }
 
 function cleanTask(task) {
@@ -121,13 +191,14 @@ function buildRequest(task, item, useSearch) {
 }
 
 // Turns a GenerateContentResponse into { text, error?, warning?, sources }.
-function normalize(r) {
+// keepSpace leaves the edges untrimmed so a continued answer joins cleanly.
+function normalize(r, { keepSpace = false } = {}) {
   if (!r) return { error: 'No response' };
   const c = r.candidates && r.candidates[0];
   const parts = (c && c.content && c.content.parts) || [];
-  const text = parts.filter((p) => typeof p.text === 'string' && !p.thought).map((p) => p.text).join('').trim();
-  const out = { text };
-  if (!text) {
+  const text = parts.filter((p) => typeof p.text === 'string' && !p.thought).map((p) => p.text).join('');
+  const out = { text: keepSpace ? text : text.trim() };
+  if (!text.trim()) {
     out.error = r.promptFeedback && r.promptFeedback.blockReason
       ? `Blocked: ${r.promptFeedback.blockReason}`
       : c && c.finishReason && c.finishReason !== 'STOP' ? `No answer (finish reason: ${c.finishReason})` : 'Empty answer';
@@ -145,7 +216,7 @@ function normalize(r) {
 }
 
 module.exports = {
-  BASE, MAX_UPLOAD_CHUNK_BYTES, MAX_FILE_BYTES, MAX_ITEMS, SYSTEM, SEARCH_NOTE,
-  httpError, allowedModels, apiKey, checkAuth, route, gemini,
+  BASE, MAX_UPLOAD_CHUNK_BYTES, MAX_FILE_BYTES, SYSTEM, SEARCH_NOTE, FINISH,
+  httpError, allowedModels, apiKey, checkAuth, route, gemini, geminiStream,
   cleanTask, cleanModel, cleanItem, buildRequest, normalize,
 };

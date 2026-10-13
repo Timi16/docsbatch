@@ -85,6 +85,18 @@ window.Extract = (() => {
   }
 
   // ---- individual readers ------------------------------------------------
+  // Text files are not always UTF-8: Notepad's "Unicode" is UTF-16 and old Windows exports are Windows-1252.
+  async function readText(file) {
+    const buf = new Uint8Array(await file.arrayBuffer());
+    if (buf[0] === 0xff && buf[1] === 0xfe) return new TextDecoder('utf-16le').decode(buf);
+    if (buf[0] === 0xfe && buf[1] === 0xff) return new TextDecoder('utf-16be').decode(buf);
+    try {
+      return new TextDecoder('utf-8', { fatal: true }).decode(buf);
+    } catch {
+      return new TextDecoder('windows-1252').decode(buf);
+    }
+  }
+
   async function readPdf(file, name) {
     if (file.size > MAX_FILE) {
       throw new Error(`PDF is ${mb(file.size)}; this deployment accepts PDFs up to 20 MB.`);
@@ -249,12 +261,12 @@ window.Extract = (() => {
     if (IMG_NATIVE[e] || IMG_CONVERT.has(e) || (mime.startsWith('image/') && e !== 'svg')) return readImage(file, name, e);
     if (AUDIO[e]) return readMedia(file, name, AUDIO[e], 'Audio');
     if (VIDEO[e]) return readMedia(file, name, VIDEO[e], 'Video');
-    if (TEXT_EXT.has(e) || mime.startsWith('text/')) return finish(await file.text(), name, '');
+    if (TEXT_EXT.has(e) || mime.startsWith('text/')) return finish(await readText(file), name, e === 'txt' ? 'text read' : '');
     if (['doc', 'ppt'].includes(e)) {
       throw new Error('Old binary .' + e + ' files cannot be read in the browser. Save it as .' + e + 'x or PDF and add it again.');
     }
     if (['rar', '7z', 'tar', 'gz', 'tgz', 'bz2'].includes(e)) throw new Error('This archive type is not supported. Use .zip.');
-    if (await sniffText(file)) return finish(await file.text(), name, 'read as plain text');
+    if (await sniffText(file)) return finish(await readText(file), name, 'read as plain text');
     throw new Error('Unsupported binary format (.' + (e || 'unknown') + ').');
   }
 

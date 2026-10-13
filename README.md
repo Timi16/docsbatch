@@ -1,7 +1,8 @@
 # DocBatch
 
 Drop files, type what you want done, get one answer per file. You can also send a message without uploading files
-for a quick live answer. Choose quick live answers for a few files or asynchronous batch processing for larger runs.
+for a live answer. Every file is answered live, and an answer that is too long for one request is continued
+automatically until it is finished.
 Your processing API key lives only in Vercel
 environment variables, never in the browser.
 
@@ -23,13 +24,16 @@ Local test: `npx vercel dev` with a `.env.local` copied from `.env.example`.
 browser                         Vercel functions (hold the key)          Google
 -------                         --------------------------------         ------
 read each file, make text   ->  /api/upload  (4 MB chunks)           ->  Files API
-create batch from file refs -> /api/submit                          -> Batch API
-poll every few seconds      -> /api/status (returns answers)       <- Batch API
-(quick mode)                 -> /api/instant (per file or message)  -> generateContent
+one request per file        ->  /api/instant (file refs or message) ->  streamGenerateContent
+answer cut off? ask again   ->  /api/instant (with the text so far) ->  streamGenerateContent
 ```
 
 Vercel limits a request to about 4.5 MB, so files are uploaded in 4 MB chunks to Google's Files API.
-The batch job only references the uploaded files, keeping its request tiny however many files you add.
+Each request only references the uploaded files, so it stays tiny however big the documents are.
+
+A function may run for 60 seconds, so `/api/instant` streams the answer and stops reading after about 40 seconds
+(or when the model hits its output limit). The page then sends back the text it has and asks for the rest, and
+repeats until the answer is finished. Nobody has to type "continue".
 
 ## Formats
 
@@ -43,7 +47,7 @@ The batch job only references the uploaded files, keeping its request tiny howev
 | OpenDocument `.odt` `.odp`, `.rtf`, `.epub` | text extracted |
 | Images png/jpg/webp/heic | sent as-is; gif/bmp/avif/tiff converted to JPEG; large ones downscaled |
 | Audio / video | sent as-is if under 20 MB |
-| Text, code, CSV, JSON, HTML, XML, emails, logs, subtitles, and anything that looks like plain text | read as text |
+| Text `.txt` `.md`, code, CSV, JSON, HTML, XML, emails, logs, subtitles, and anything that looks like plain text | read as text (UTF-8, UTF-16 or Windows-1252) |
 | `.zip` | unpacked, every file inside is processed (2 levels deep) |
 
 Not supported: old binary `.doc` / `.ppt` (save as `.docx`/`.pptx` or PDF), `.rar` `.7z` `.tar`, password-protected files,
@@ -53,13 +57,11 @@ audio/video over 20 MB.
 
 - **20 MB per uploaded file**. Files are sent in 4 MB chunks to stay below Vercel's request-body limit.
   Extracted text and spreadsheets are truncated to about 4 MB.
-- **150 files per run** so the answers fit in one 4.5 MB response.
-- Batch jobs are asynchronous and may take up to an hour. Failed processing jobs and individual files are retried
-  automatically with increasing delays, up to every five minutes, until they succeed. Retries are coordinated by the
-  browser, so keep the page open or reopen it to resume retries. Use Quick mode for live responses on a few files.
-  The page stores the batch job in your browser. After a run, use **Run previous files again** to repeat it with the
-  same prompt and options while the uploaded copies are available (up to 40 hours); this shortcut lasts only in the
-  current tab. Google keeps results for 6 weeks.
+- **150 files per run**, answered three at a time.
+- Failed requests are retried automatically with increasing delays, up to every five minutes, until they succeed
+  or you press **Stop**. Answers that were already finished are kept. Keep the page open while a run is going.
+  After a run, use **Run previous files again** to repeat it with the same prompt and options while the uploaded
+  copies are available (up to 40 hours); this shortcut lasts only in the current tab.
 - Uploaded files are deleted by Google after 48 hours.
 - Free-tier keys: Google may use submitted content to improve its products. Use a billing-enabled key for private documents.
 - "Allow web search" adds grounded search to each request and is billed separately by Google. It is enabled by default.
@@ -71,7 +73,7 @@ audio/video over 20 MB.
 public/index.html   page
 public/style.css    styles
 public/extract.js   reads any file type in the browser
-public/app.js       UI, upload, batch polling, results, downloads
+public/app.js       UI, upload, live answers, results, downloads
 api/*.js            serverless functions (key stays here)
 vercel.json         serves public/, 60 s function limit
 ```

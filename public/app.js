@@ -1,4 +1,4 @@
-/* app.js - UI + flow: add files -> read & upload -> create batch job -> poll -> show results */
+/* app.js - UI + flow: add files -> read & upload -> live answer per file -> show results */
 (() => {
   'use strict';
 
@@ -6,7 +6,6 @@
   const MAX_FILES = 150;
   const MAX_FILE_BYTES = window.Extract.MAX_FILE;
   const UPLOAD_CHUNK_BYTES = window.Extract.MAX_CHUNK;
-  const LS_JOB = 'docbatch.job.v1';
   const LS_TASK = 'docbatch.task.v1';
   const SS_PW = 'docbatch.pw';
   const PRESETS = [
@@ -17,14 +16,6 @@
     ['Translate', 'Translate this document into English. Keep the structure.'],
     ['Proofread', 'List every spelling, grammar and clarity problem in this document, with a suggested fix for each.'],
   ];
-  const STATE_LABEL = {
-    PENDING: 'Waiting in the processing queue',
-    RUNNING: 'Processing your files',
-    SUCCEEDED: 'Finished',
-    FAILED: 'The job failed',
-    CANCELLED: 'Cancelled',
-    EXPIRED: 'Expired',
-  };
   const STATUS_LABEL = {
     queued: 'Queued', reading: 'Reading…', uploading: 'Uploading…', ready: 'Ready',
     processing: 'Processing', processed: 'Processed', cancelled: 'Cancelled', failed: 'Failed',
@@ -34,14 +25,11 @@
     files: [],
     busy: false,
     config: null,
-    mode: 'quick',
-    job: null,
-    retrying: false,
     cancelRequested: false,
+    abort: null,
     results: [],
     lastRun: null,
     pw: sessionStorage.getItem(SS_PW) || '',
-    timer: null,
     nextId: 1,
     formatterNoticeShown: false,
   };
@@ -92,7 +80,7 @@
     }
   }
 
-  async function api(path, { method = 'GET', json, body, headers = {} } = {}) {
+  async function api(path, { method = 'GET', json, body, headers = {}, signal } = {}) {
     const h = { ...headers };
     if (state.pw) h['x-app-password'] = state.pw;
     let payload = body;
@@ -100,7 +88,7 @@
       h['Content-Type'] = 'application/json';
       payload = JSON.stringify(json);
     }
-    const res = await fetch('/api/' + path, { method, headers: h, body: payload });
+    const res = await fetch('/api/' + path, { method, headers: h, body: payload, signal });
     const text = await res.text();
     let data = null;
     try { data = text ? JSON.parse(text) : null; } catch { data = { error: res.status === 413 ? 'File too large for this deployment.' : text.slice(0, 200) }; }
@@ -123,24 +111,51 @@
     throw last;
   }
   const retryDelay = (attempt) => Math.min(5000 * (2 ** Math.min(attempt, 6)), 300000);
-  async function submitBatch(items, task, useSearch) {
+  // A long answer is fetched in several pieces; this caps how many before giving up.
+  const MAX_PIECES = 40;
+  const STOPPED = new Error('Stopped.');
+  // Waits before a retry, ending early when the run is stopped.
+  async function pause(ms) {
+    const until = Date.now() + ms;
+    while (Date.now() < until && !state.cancelRequested) await sleep(Math.min(250, until - Date.now()));
+  }
+  // One live answer. Failed requests are retried, and an answer that was cut off is
+  // continued from where it stopped until it is finished, with no action from the user.
+  async function ask(payload, note) {
+    let text = '';
+    const sources = [];
     let attempt = 0;
-    while (!state.cancelRequested) {
-      try {
-        return await api('submit', { method: 'POST', json: { task, useSearch, items } });
-      } catch (e) {
-        if (e.status === 401) throw e;
-        attempt++;
-        showProgress({
-          title: 'Still working — retrying submission',
-          sub: `Retry ${attempt} in ${fmtTime(retryDelay(attempt) / 1000)}.`,
-          pct: 0,
-          cancel: !!state.job,
-        });
-        await sleep(retryDelay(attempt));
+    for (let pieces = 1; ; pieces++) {
+      let result;
+      while (!result) {
+        if (state.cancelRequested) throw STOPPED;
+        try {
+          result = await api('instant', { method: 'POST', json: text ? { ...payload, prior: text } : payload, signal: state.abort.signal });
+          if (result.error) throw new Error(result.error);
+        } catch (e) {
+          if (state.cancelRequested) throw STOPPED;
+          if (e.status === 401) throw e;
+          result = null;
+          attempt++;
+          note(`retry ${attempt}`);
+          await pause(retryDelay(attempt));
+        }
       }
+      attempt = 0;
+      text += result.text;
+      for (const source of result.sources || []) {
+        if (!sources.some((seen) => seen.uri === source.uri)) sources.push(source);
+      }
+      if (!result.incomplete) return { text: text.trim(), warning: result.warning, sources };
+      if (pieces >= MAX_PIECES) return { text: text.trim(), warning: 'This answer was too long to finish and stops early.', sources };
+      note('continuing a long answer');
     }
-    return null;
+  }
+  function stopRun() {
+    if (!state.busy || state.cancelRequested) return;
+    state.cancelRequested = true;
+    if (state.abort) state.abort.abort();
+    toast('Stopping…', 'info');
   }
   function loadScript(key) {
     if (!formatterLoads[key]) {
@@ -302,12 +317,6 @@
     bar.classList.toggle('indet', pct === null);
     bar.firstElementChild.style.width = pct === null ? '' : Math.max(2, Math.min(100, pct)) + '%';
   }
-  function startTimer(getText) {
-    stopTimer();
-    const t0 = Date.now();
-    state.timer = setInterval(() => { $('#progSub').textContent = getText(Math.floor((Date.now() - t0) / 1000)); }, 1000);
-  }
-  function stopTimer() { clearInterval(state.timer); state.timer = null; }
 
   function updateRunState() {
     const btn = $('#runBtn');
@@ -321,10 +330,8 @@
     rerunBtn.hidden = !state.lastRun;
     rerunBtn.disabled = state.busy;
     $('#runHint').textContent = !state.files.length
-      ? 'Messages get a quick live answer. Add files to process documents.'
-      : state.mode === 'batch'
-      ? 'Batch jobs run in the background and may take up to an hour.'
-      : 'Quick mode returns live answers and works best for a few files.';
+      ? 'Messages get a live answer. Add files to process documents.'
+      : 'Every file gets a live answer. Long answers are finished automatically.';
   }
 
   // ---- run ---------------------------------------------------------------
@@ -336,18 +343,14 @@
     try { localStorage.setItem(LS_TASK, task); } catch { /* ignore */ }
 
     state.busy = true;
-    state.job = null;
-    state.retrying = false;
     state.cancelRequested = false;
-    stopTimer();
-    try { localStorage.removeItem(LS_JOB); } catch { /* ignore */ }
+    state.abort = new AbortController();
     $('#resCard').hidden = true;
     state.results = [];
     for (const f of state.files) { if (f.status === 'failed') { f.status = 'queued'; f.error = ''; } }
     renderFiles();
 
     const useSearch = $('#useSearch').checked;
-    const mode = state.mode;
 
     try {
       if (!state.files.length) {
@@ -397,13 +400,13 @@
         })),
         task,
         useSearch,
-        mode,
         expiresAt: Math.min(...ready.map((f) => f.uploadedAt + 40 * 3600 * 1000)),
       };
       renderFiles();
-      await executePrepared(ready, failed, { task, useSearch, mode });
+      await runFiles(ready, failed, { task, useSearch });
     } catch (e) {
       if (e.status === 401) needPassword('Wrong or missing password.');
+      else if (e === STOPPED) toast('Stopped.', 'info');
       else toast(e.message || 'Something went wrong.');
       $('#progCard').hidden = true;
     } finally {
@@ -413,53 +416,17 @@
   }
 
   async function runMessage(message, useSearch) {
-    let attempt = 0;
-    showProgress({ title: 'Sending your message', sub: 'Getting a live answer…', pct: null });
-    while (true) {
-      try {
-        const result = await api('instant', {
-          method: 'POST',
-          json: { message, useSearch },
-        });
-        if (result.error) throw new Error(result.error);
-        state.results = [{
-          name: 'Message',
-          text: `**You:** ${message}\n\n**Assistant:** ${result.text}`,
-          warning: result.warning,
-          sources: result.sources,
-        }];
-        showProgress({ title: 'Finished', sub: 'Your message has been answered.', pct: 100 });
-        renderResults('Reply');
-        return;
-      } catch (e) {
-        if (e.status === 401) throw e;
-        attempt++;
-        showProgress({
-          title: 'Still processing — retrying',
-          sub: `Retry ${attempt} for your message.`,
-          pct: null,
-        });
-        await sleep(retryDelay(attempt));
-      }
-    }
-  }
-
-  async function executePrepared(ready, failed, { task, useSearch, mode }) {
-    if (mode === 'quick') {
-      await runQuick(ready, failed, { task, useSearch });
-      return;
-    }
-    const items = ready.map((f, i) => ({ key: 'f' + i, name: f.name, parts: f.uploaded, id: f.id }));
-    setStatuses(ready, 'processing');
-    showProgress({ title: 'Creating the batch job…', pct: null });
-    const created = await submitBatch(items, task, useSearch);
-    if (!created) return;
-    state.job = {
-      name: created.name, task, useSearch, allItems: items, activeItems: items,
-      completed: [], failed, retryCount: 0, createdAt: Date.now(),
-    };
-    try { localStorage.setItem(LS_JOB, JSON.stringify(state.job)); } catch { /* ignore */ }
-    await pollJob();
+    const progress = (sub) => showProgress({ title: 'Answering your message', sub, pct: null, cancel: true });
+    progress('Getting a live answer…');
+    const result = await ask({ message, useSearch }, (what) => progress(what[0].toUpperCase() + what.slice(1) + '…'));
+    state.results = [{
+      name: 'Message',
+      text: `**You:** ${message}\n\n**Assistant:** ${result.text}`,
+      warning: result.warning,
+      sources: result.sources,
+    }];
+    showProgress({ title: 'Finished', sub: 'Your message has been answered.', pct: 100 });
+    renderResults('Reply');
   }
 
   async function rerun() {
@@ -471,19 +438,17 @@
     }
     if (state.config && state.config.passwordRequired && !state.pw) return needPassword();
     state.busy = true;
-    state.job = null;
-    state.retrying = false;
     state.cancelRequested = false;
-    stopTimer();
-    try { localStorage.removeItem(LS_JOB); } catch { /* ignore */ }
+    state.abort = new AbortController();
     $('#resCard').hidden = true;
     state.results = [];
     renderFiles();
     try {
       const files = previous.files.map((saved) => state.files.find((file) => file.id === saved.id) || saved);
-      await executePrepared(files, [], previous);
+      await runFiles(files, [], previous);
     } catch (e) {
       if (e.status === 401) needPassword('Wrong or missing password.');
+      else if (e === STOPPED) toast('Stopped.', 'info');
       else toast(e.message || 'Something went wrong.');
       $('#progCard').hidden = true;
     } finally {
@@ -492,297 +457,40 @@
     }
   }
 
-  async function runQuick(ready, failed, { task, useSearch }) {
+  async function runFiles(ready, failed, { task, useSearch }) {
     const rows = new Array(ready.length);
     let done = 0;
+    const progress = (extra) => showProgress({
+      title: 'Getting answers',
+      sub: `${done} of ${ready.length} answered` + (extra ? ` · ${extra}` : ''),
+      pct: (done / ready.length) * 100,
+      cancel: true,
+    });
     setStatuses(ready, 'processing');
-    showProgress({ title: 'Getting quick answers', sub: `0 of ${ready.length} answered`, pct: 0 });
+    progress();
     await pool(ready, 3, async (f, i) => {
-      let attempt = 0;
-      while (!rows[i]) {
-        try {
-          const result = await api('instant', {
-            method: 'POST',
-            json: { task, useSearch, name: f.name, parts: f.uploaded },
-          });
-          if (result.error) throw new Error(result.error);
-          rows[i] = { name: f.name, ...result };
-          f.status = 'processed';
-        } catch (e) {
-          if (e.status === 401) throw e;
-          attempt++;
-          showProgress({
-            title: 'Still processing — retrying',
-            sub: `${done} of ${ready.length} files processed · retry ${attempt} for ${f.name}`,
-            pct: (done / ready.length) * 100,
-          });
-          await sleep(retryDelay(attempt));
-        }
+      try {
+        const result = await ask({ task, useSearch, name: f.name, parts: f.uploaded }, (what) => progress(`${what} for ${f.name}`));
+        rows[i] = { name: f.name, ...result };
+        f.status = 'processed';
+      } catch (e) {
+        if (e !== STOPPED) throw e;
+        return;
       }
       done++;
       renderFiles();
       state.results = [...failed, ...rows.filter(Boolean)];
-      showProgress({ title: 'Getting quick answers', sub: `${done} of ${ready.length} answered`, pct: (done / ready.length) * 100 });
+      progress();
       renderResults('Results');
     });
-    state.results = [...failed, ...rows];
-    showProgress({ title: 'Finished', sub: `${ready.length - rows.filter((r) => r.error).length} of ${ready.length} files answered`, pct: 100 });
-    renderResults('Results');
-  }
-
-  // ---- batch polling -----------------------------------------------------
-  async function pollJob() {
-    let job = state.job;
-    if (!job) return;
-    let delay = 5000;
-    const t0 = job.createdAt || Date.now();
-    startTimer((s) => `Running for ${fmtTime(s)}`);
-    $('#progTitle').textContent = 'Batch job submitted';
-    while (state.job && !state.cancelRequested) {
-      job = state.job;
-      if (job.retryPending) {
-        const created = await submitBatch(job.activeItems, job.task, job.useSearch);
-        if (!created) break;
-        job.name = created.name;
-        job.createdAt = Date.now();
-        job.retryPending = false;
-        state.job = job;
-        try { localStorage.setItem(LS_JOB, JSON.stringify(job)); } catch { /* ignore */ }
-        state.retrying = false;
-        delay = 5000;
-        continue;
-      }
-      let st;
-      try {
-        st = await api('status?name=' + encodeURIComponent(job.name));
-      } catch (e) {
-        if (e.status === 401) { stopTimer(); needPassword('Enter the access password to continue.'); return; }
-        job.retryCount = (job.retryCount || 0) + 1;
-        job.retryPending = true;
-        try { localStorage.setItem(LS_JOB, JSON.stringify(job)); } catch { /* ignore */ }
-        state.retrying = true;
-        showProgress({
-          title: 'Still processing — reconnecting',
-          sub: 'Checking the job again shortly.',
-          pct: getJobPercent(job),
-          cancel: true,
-        });
-        await sleep(Math.max(delay, retryDelay(job.retryCount)));
-        continue;
-      }
-      const hasUnfinishedResults = st.stateName === 'SUCCEEDED'
-        && (!Array.isArray(st.results) || st.results.some((result) => result.error || !result.text));
-      const retryingTerminal = ['FAILED', 'EXPIRED'].includes(st.stateName) || hasUnfinishedResults;
-      const label = retryingTerminal
-        ? 'Still processing — retrying'
-        : STATE_LABEL[st.stateName] || st.stateName || 'Waiting';
-      const s = st.stats;
-      const activeComplete = s ? (s.ok || 0) : 0;
-      const complete = (job.completed || []).length + activeComplete;
-      const total = (job.allItems || job.activeItems || []).length;
-      const resultComplete = st.stateName === 'SUCCEEDED' && Array.isArray(st.results)
-        ? st.results.filter((result) => !result.error && result.text).length
-        : activeComplete;
-      const pct = total ? ((job.completed || []).length + resultComplete) / total * 100 : null;
-      showProgress({
-        title: label,
-        sub: `${complete} of ${total} files processed`,
-        pct,
-        meta: 'Safe to close this tab; reopen it to get the results.',
-        cancel: !st.terminal,
-      });
-      if (st.terminal) {
-        if (st.stateName === 'CANCELLED') {
-          stopTimer();
-          finishJob({ stateName: 'CANCELLED', error: 'Job cancelled.' });
-          return;
-        }
-        if (st.stateName === 'EXPIRED') {
-          if (!await refreshExpiredItems(job)) {
-            stopTimer();
-            finishJob({ stateName: 'EXPIRED', error: 'The source files are no longer available in this tab to restart processing.' });
-            return;
-          }
-        } else if (st.stateName === 'SUCCEEDED' && await collectBatchResults(job, st)) {
-          stopTimer();
-          return;
-        }
-        job.retryCount = (job.retryCount || 0) + 1;
-        showProgress({
-          title: 'Still processing — retrying',
-          sub: `Retrying ${job.activeItems.length} unfinished file${job.activeItems.length === 1 ? '' : 's'} in ${fmtTime(retryDelay(job.retryCount) / 1000)}.`,
-          pct: getJobPercent(job),
-          meta: 'Completed files are kept; unfinished files are retried automatically.',
-          cancel: true,
-        });
-        await sleep(retryDelay(job.retryCount));
-        if (state.cancelRequested) break;
-        const created = await submitBatch(job.activeItems, job.task, job.useSearch);
-        if (!created) break;
-        job.name = created.name;
-        job.createdAt = Date.now();
-        job.retryPending = false;
-        state.job = job;
-        state.retrying = false;
-        try { localStorage.setItem(LS_JOB, JSON.stringify(job)); } catch { /* ignore */ }
-        delay = 5000;
-        continue;
-      }
-      await sleep(delay);
-      delay = Math.min(Math.round(delay * 1.25), 30000);
-    }
-    stopTimer();
+    state.results = [...failed, ...rows.filter(Boolean)];
     if (state.cancelRequested) {
-      for (const item of state.job?.activeItems || []) {
-        const file = state.files.find((entry) => entry.id === item.id);
-        if (file) file.status = 'cancelled';
-      }
-      state.job = null;
-      state.retrying = false;
-      try { localStorage.removeItem(LS_JOB); } catch { /* ignore */ }
-      renderFiles();
-      showProgress({ title: 'Cancelled', sub: 'Automatic retries stopped.', pct: getJobPercent(job) });
+      for (const f of ready) if (f.status !== 'processed') f.status = 'cancelled';
+      showProgress({ title: 'Stopped', sub: `${done} of ${ready.length} files answered`, pct: (done / ready.length) * 100 });
+    } else {
+      showProgress({ title: 'Finished', sub: `${done} of ${ready.length} files answered`, pct: 100 });
     }
-  }
-
-  function getJobPercent(job) {
-    const total = (job.allItems || job.activeItems || []).length;
-    const done = (job.completed || []).length;
-    return total ? (done / total) * 100 : 0;
-  }
-
-  async function refreshExpiredItems(job) {
-    for (const item of job.activeItems || []) {
-      const file = state.files.find((entry) => entry.id === item.id);
-      if (!file || !file.file) return false;
-      let attempt = 0;
-      while (true) {
-        try {
-          const prep = await window.Extract.prepare(file.file, file.name);
-          const parts = [];
-          for (const blob of prep.blobs) {
-            const uploaded = await withRetry(() => uploadFile(blob));
-            parts.push({ uri: uploaded.uri, mimeType: uploaded.mimeType || blob.mime });
-          }
-          item.parts = parts;
-          file.uploaded = parts;
-          file.uploadedAt = Date.now();
-          break;
-        } catch (error) {
-          if (error.status === 401) throw error;
-          attempt++;
-          showProgress({
-            title: 'Still processing — retrying file upload',
-            sub: `Retry ${attempt} for ${file.name} in ${fmtTime(retryDelay(attempt) / 1000)}.`,
-            pct: getJobPercent(job),
-            cancel: true,
-          });
-          await sleep(retryDelay(attempt));
-        }
-      }
-    }
-    return true;
-  }
-
-  async function collectBatchResults(job, st) {
-    const byKey = new Map((job.activeItems || []).map((item, i) => [item.key, { ...item, i }]));
-    const responseByKey = new Map();
-    for (const response of st.results || []) {
-      const item = (response.key && byKey.get(response.key)) || (job.activeItems || [])[response.index];
-      if (item) responseByKey.set(item.key, response);
-    }
-    const retry = [];
-    const completed = job.completed || (job.completed = []);
-    for (const item of job.activeItems || []) {
-      const response = responseByKey.get(item.key);
-      if (response && !response.error && response.text) {
-        const previous = completed.findIndex((result) => result.key === item.key);
-        const result = { key: item.key, name: item.name, id: item.id, text: response.text, warning: response.warning, sources: response.sources };
-        if (previous < 0) completed.push(result);
-        else completed[previous] = result;
-        const file = state.files.find((entry) => entry.id === item.id);
-        if (file) file.status = 'processed';
-      } else {
-        retry.push(item);
-        const file = state.files.find((entry) => entry.id === item.id);
-        if (file) file.status = 'processing';
-      }
-    }
-    renderFiles();
-    if (retry.length) {
-      job.activeItems = retry;
-      return false;
-    }
-    job.activeItems = [];
-    const completeResults = completed.map((result, index) => ({
-      key: result.key,
-      index: (job.allItems || []).findIndex((item) => item.key === result.key),
-      text: result.text,
-      warning: result.warning,
-      sources: result.sources,
-    }));
-    finishJob({ stateName: 'SUCCEEDED', results: completeResults });
-    return true;
-  }
-
-  function finishJob(st) {
-    const job = state.job;
-    if (st.stateName !== 'SUCCEEDED' || !st.results) {
-      const affected = st.stateName === 'CANCELLED'
-        ? job.activeItems || job.allItems || job.items || []
-        : job.allItems || job.items || [];
-      for (const item of affected) {
-        const file = state.files.find((entry) => entry.id === item.id);
-        if (file) file.status = st.stateName === 'CANCELLED' ? 'cancelled' : 'failed';
-      }
-      renderFiles();
-      if (st.stateName === 'CANCELLED' && job.completed?.length) {
-        state.results = [
-          ...(job.failed || []).map((item) => ({ name: item.name, error: item.error })),
-          ...job.completed.map((item) => ({ ...item })),
-        ];
-        renderResults('Completed results');
-      }
-      showProgress({ title: STATE_LABEL[st.stateName] || 'Finished', sub: st.error || '', pct: 100 });
-      if (st.error) toast(st.error);
-      return;
-    }
-    const items = job.allItems || job.items || [];
-    const byKey = new Map(items.map((it, i) => [it.key, { ...it, i }]));
-    const rows = [];
-    const completed = new Set();
-    for (const r of st.results) {
-      const it = (r.key && byKey.get(r.key)) || items[r.index] || { name: 'file ' + (r.index + 1) };
-      if (it.key) completed.add(it.key);
-      const file = state.files.find((entry) => entry.id === it.id);
-      if (file) file.status = r.error ? 'failed' : 'processed';
-      rows.push({ name: it.name, text: r.text, error: r.error, warning: r.warning, sources: r.sources, _o: (byKey.get(r.key) || {}).i ?? r.index });
-    }
-    for (const item of items) {
-      if (!completed.has(item.key)) {
-        const file = state.files.find((entry) => entry.id === item.id);
-        if (file) file.status = 'failed';
-      }
-    }
-    renderFiles();
-    rows.sort((a, b) => a._o - b._o);
-    state.results = [...(job.failed || []).map((x) => ({ name: x.name, error: x.error })), ...rows];
-    const ok = rows.filter((r) => !r.error).length;
-    showProgress({ title: 'Finished', sub: `${ok} of ${rows.length} files answered`, pct: 100 });
-    renderResults('Results · ' + new Date(job.createdAt).toLocaleString());
-  }
-
-  async function cancelJob() {
-    if (!state.job) return;
-    if (state.retrying) {
-      state.cancelRequested = true;
-      toast('Stopping automatic retries…', 'info');
-      return;
-    }
-    try {
-      await api('cancel', { method: 'POST', json: { name: state.job.name } });
-      toast('Cancel requested. Waiting for confirmation…', 'info');
-    } catch (e) { toast(e.message); }
+    if (state.results.length) renderResults('Results');
   }
 
   // ---- results -----------------------------------------------------------
@@ -949,24 +657,6 @@
     }
   }
 
-  function resumeSavedJob() {
-    let saved = null;
-    try { saved = JSON.parse(localStorage.getItem(LS_JOB) || 'null'); } catch { /* ignore */ }
-    if (!saved || !saved.name || (!Array.isArray(saved.allItems) && !Array.isArray(saved.items))) return;
-    if (!saved.allItems && Array.isArray(saved.items)) {
-      saved.allItems = saved.items;
-      saved.activeItems = saved.items;
-      saved.completed = [];
-      saved.retryCount = 0;
-    }
-    state.job = saved;
-    state.retrying = !!saved.retryPending;
-    state.busy = true;
-    renderFiles();
-    showProgress({ title: 'Restoring your last job…', pct: null, cancel: true });
-    pollJob().finally(() => { state.busy = false; renderFiles(); });
-  }
-
   function init() {
     const taskBox = $('#task');
     try { taskBox.value = localStorage.getItem(LS_TASK) || ''; } catch { /* ignore */ }
@@ -988,21 +678,13 @@
     $('#addFolder').addEventListener('click', () => $('#folderInput').click());
     $('#clearFiles').addEventListener('click', () => { if (!state.busy) { state.files = []; renderFiles(); } });
 
-    $('#modeSeg').addEventListener('click', (e) => {
-      const button = e.target.closest('button[data-mode]');
-      if (!button) return;
-      state.mode = button.dataset.mode;
-      for (const option of $('#modeSeg').children) option.classList.toggle('on', option === button);
-      updateRunState();
-    });
-
     $('#pw').value = state.pw;
     $('#pw').addEventListener('input', (e) => { state.pw = e.target.value; try { sessionStorage.setItem(SS_PW, state.pw); } catch { /* ignore */ } });
     $('#pw').addEventListener('keydown', (e) => { if (e.key === 'Enter') run(); });
 
     $('#runBtn').addEventListener('click', run);
     $('#rerunBtn').addEventListener('click', rerun);
-    $('#cancelBtn').addEventListener('click', cancelJob);
+    $('#cancelBtn').addEventListener('click', stopRun);
     $('#resFilter').addEventListener('input', () => renderResults($('#resTitle').textContent));
     $('#copyAll').addEventListener('click', () => copyText(state.results.map((r) => `${r.name}\n${r.error ? 'FAILED: ' + r.error : r.text}`).join('\n\n---\n\n')));
     const menu = $('#dlMenu');
@@ -1010,8 +692,9 @@
     menu.addEventListener('click', (e) => { const b = e.target.closest('button[data-fmt]'); if (b) { exportData(b.dataset.fmt); menu.hidden = true; } });
     document.addEventListener('click', () => { menu.hidden = true; });
 
+    try { localStorage.removeItem('docbatch.job.v1'); } catch { /* ignore */ } // left over from the old batch mode
     renderFiles();
-    loadConfig().then(resumeSavedJob);
+    loadConfig();
   }
 
   init();
