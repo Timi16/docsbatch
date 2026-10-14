@@ -1,10 +1,10 @@
-/* extract.js - turns almost any file into something Gemini can read, entirely in the browser.
+/* extract.js - turns almost any file into something the model can read, entirely in the browser.
  *
  * prepare(file, name) -> { blobs: [{ blob, mime, name }], note }
  *   - text-like files, Word, Excel, PowerPoint, OpenDocument, RTF, EPUB, text PDFs -> plain text
  *   - scanned PDFs -> the PDF itself, up to 20 MB
  *   - images -> as-is, or converted/downscaled to JPEG
- *   - audio / video -> as-is when small enough
+ *   - audio / video -> not supported
  * expandZips(items) unpacks .zip files into their individual files.
  */
 window.Extract = (() => {
@@ -41,10 +41,9 @@ window.Extract = (() => {
     'js mjs cjs ts tsx jsx py rb php java c h cpp hpp cs go rs swift kt sql sh bat ps1 r tex bib srt vtt css ' +
     'scss less vue svelte ipynb rst org adoc properties gradle vcf ics'
   ).split(' '));
-  const IMG_NATIVE = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp', heic: 'image/heic', heif: 'image/heif' };
-  const IMG_CONVERT = new Set(['gif', 'bmp', 'avif', 'ico', 'tif', 'tiff']);
-  const AUDIO = { mp3: 'audio/mp3', wav: 'audio/wav', aac: 'audio/aac', m4a: 'audio/aac', flac: 'audio/flac', ogg: 'audio/ogg', oga: 'audio/ogg', aiff: 'audio/aiff', aif: 'audio/aiff' };
-  const VIDEO = { mp4: 'video/mp4', mov: 'video/mov', webm: 'video/webm', mpeg: 'video/mpeg', mpg: 'video/mpg', avi: 'video/avi', wmv: 'video/wmv', flv: 'video/x-flv', '3gp': 'video/3gpp', m4v: 'video/mp4' };
+  const IMG_NATIVE = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp' };
+  const IMG_CONVERT = new Set(['gif', 'bmp', 'avif', 'ico', 'tif', 'tiff', 'heic', 'heif']);
+  const MEDIA = new Set('mp3 wav aac m4a flac ogg oga aiff aif mp4 mov webm mpeg mpg avi wmv flv 3gp m4v'.split(' '));
 
   const ext = (n) => (String(n).split('.').length > 1 ? String(n).split('.').pop().toLowerCase() : '');
   const mb = (n) => (n / 1024 / 1024).toFixed(1) + ' MB';
@@ -119,7 +118,7 @@ window.Extract = (() => {
     }
     if (chars / doc.numPages >= 40) return finish(text, name, `${doc.numPages} page${doc.numPages > 1 ? 's' : ''}, text read`);
 
-    // Scanned / image-only PDF: let Gemini read it visually.
+    // Scanned / image-only PDF: let the model read it visually.
     return { blobs: [{ blob: file, mime: 'application/pdf', name }], note: 'scanned PDF, sent as-is for visual reading' };
   }
 
@@ -238,13 +237,6 @@ window.Extract = (() => {
     };
   }
 
-  function readMedia(file, name, mime, kind) {
-    if (file.size > MAX_FILE) {
-      throw new Error(`${kind} file is ${mb(file.size)}; this deployment accepts up to 20 MB per file.`);
-    }
-    return { blobs: [{ blob: file, mime, name }], note: `${kind.toLowerCase()} sent as-is` };
-  }
-
   // ---- public ------------------------------------------------------------
   async function prepare(file, name) {
     const e = ext(file.name);
@@ -259,8 +251,7 @@ window.Extract = (() => {
     if (e === 'epub') return readEpub(file, name);
     if (e === 'rtf') return readRtf(file, name);
     if (IMG_NATIVE[e] || IMG_CONVERT.has(e) || (mime.startsWith('image/') && e !== 'svg')) return readImage(file, name, e);
-    if (AUDIO[e]) return readMedia(file, name, AUDIO[e], 'Audio');
-    if (VIDEO[e]) return readMedia(file, name, VIDEO[e], 'Video');
+    if (MEDIA.has(e) || mime.startsWith('audio/') || mime.startsWith('video/')) throw new Error('Audio and video files are not supported.');
     if (TEXT_EXT.has(e) || mime.startsWith('text/')) return finish(await readText(file), name, e === 'txt' ? 'text read' : '');
     if (['doc', 'ppt'].includes(e)) {
       throw new Error('Old binary .' + e + ' files cannot be read in the browser. Save it as .' + e + 'x or PDF and add it again.');

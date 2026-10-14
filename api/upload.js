@@ -1,5 +1,5 @@
 'use strict';
-const { route, gemini, httpError, MAX_UPLOAD_CHUNK_BYTES, MAX_FILE_BYTES } = require('./_lib');
+const { route, openai, httpError, MAX_UPLOAD_CHUNK_BYTES, MAX_FILE_BYTES, FILE_TTL_SECONDS } = require('./_lib');
 
 async function readBody(req) {
   if (Buffer.isBuffer(req.body)) return req.body;
@@ -10,28 +10,21 @@ async function readBody(req) {
   return Buffer.concat(chunks);
 }
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-function uploadUrlFrom(req) {
-  const value = String(req.headers['x-upload-url'] || '');
-  let url;
-  try { url = new URL(value); } catch { throw httpError(400, 'Bad upload session. Start the upload again.'); }
-  if (url.protocol !== 'https:' || url.hostname !== 'generativelanguage.googleapis.com' || url.port
-    || !/^\/upload\/v1beta\/files(?:\/|$)/.test(url.pathname) || url.username || url.password || url.hash) {
-    throw httpError(400, 'Bad upload session. Start the upload again.');
-  }
-  return url;
+function uploadIdFrom(req) {
+  const id = String(req.headers['x-upload-id'] || '');
+  if (!/^upload_[A-Za-z0-9]{1,100}$/.test(id)) throw httpError(400, 'Bad upload session. Start the upload again.');
+  return id;
 }
 
-async function waitUntilReady(file) {
-  for (let i = 0; i < 10 && file.state === 'PROCESSING'; i++) {
-    await sleep(1500);
-    file = (await gemini(`/v1beta/${file.name}`)).data;
-  }
-  if (file.state === 'FAILED') throw httpError(422, 'The processing service could not process this file.');
-  return file;
+function partIdsFrom(req) {
+  const value = String(req.headers['x-upload-parts'] || '');
+  const ids = value ? value.split(',') : [];
+  if (ids.length > 10 || ids.some((id) => !/^part_[A-Za-z0-9]{1,100}$/.test(id))) throw httpError(400, 'Bad upload chunk. Start the upload again.');
+  return ids;
 }
 
+// A file goes up in chunks below Vercel's body limit: a JSON request starts an upload session,
+// each raw chunk becomes one part, and the final chunk also joins the parts into a file.
 module.exports = route(async (req) => {
   if (req.body && typeof req.body === 'object' && !Buffer.isBuffer(req.body)) {
     const name = String(req.body.name || 'file').slice(0, 120);
@@ -41,49 +34,28 @@ module.exports = route(async (req) => {
     if (!Number.isSafeInteger(size) || size <= 0 || size > MAX_FILE_BYTES) {
       throw httpError(413, 'Files must be 20 MB or smaller.');
     }
-
-    const start = await gemini('/upload/v1beta/files', {
+    const upload = await openai('/uploads', {
       method: 'POST',
-      headers: {
-        'X-Goog-Upload-Protocol': 'resumable',
-        'X-Goog-Upload-Command': 'start',
-        'X-Goog-Upload-Header-Content-Length': String(size),
-        'X-Goog-Upload-Header-Content-Type': mime,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ file: { display_name: name } }),
+      json: { filename: name, purpose: 'user_data', bytes: size, mime_type: mime, expires_after: { anchor: 'created_at', seconds: FILE_TTL_SECONDS } },
     });
-    const uploadUrl = start.headers.get('x-goog-upload-url');
-    if (!uploadUrl) throw httpError(502, 'The processing service did not return an upload URL.');
-    return { uploadUrl };
+    if (!upload.id) throw httpError(502, 'The processing service did not start the upload.');
+    return { uploadId: upload.id };
   }
 
+  const id = uploadIdFrom(req);
   const bytes = await readBody(req);
   if (!bytes.length) throw httpError(400, 'Empty file.');
   if (bytes.length > MAX_UPLOAD_CHUNK_BYTES) throw httpError(413, 'Upload chunks must be smaller than 4 MB.');
-  const offset = Number(req.headers['x-upload-offset']);
   const command = String(req.headers['x-upload-command'] || '');
-  if (!Number.isSafeInteger(offset) || offset < 0 || offset + bytes.length > MAX_FILE_BYTES
-    || !['upload', 'upload, finalize'].includes(command)) {
-    throw httpError(400, 'Bad upload chunk. Start the upload again.');
-  }
+  if (!['upload', 'upload, finalize'].includes(command)) throw httpError(400, 'Bad upload chunk. Start the upload again.');
 
-  const up = await fetch(uploadUrlFrom(req), {
-    method: 'POST',
-    headers: {
-      'X-Goog-Upload-Offset': String(offset),
-      'X-Goog-Upload-Command': command,
-      'Content-Type': 'application/octet-stream',
-    },
-    body: bytes,
-  });
-  const text = await up.text();
-  let data = {};
-  try { data = text ? JSON.parse(text) : {}; } catch { /* handled below */ }
-  if (!up.ok) throw httpError(up.status === 429 ? 429 : 502, (data.error && data.error.message) || `Upload failed (${up.status}).`);
-  if (command !== 'upload, finalize') return { uploaded: bytes.length };
-  if (!data.file) throw httpError(502, 'The processing service did not finish the file upload.');
+  const form = new FormData();
+  form.append('data', new Blob([bytes]), 'chunk');
+  const part = await openai(`/uploads/${id}/parts`, { method: 'POST', body: form });
+  if (!part.id) throw httpError(502, 'The processing service did not accept the upload chunk.');
+  if (command !== 'upload, finalize') return { part: part.id };
 
-  const file = await waitUntilReady(data.file);
-  return { name: file.name, uri: file.uri, mimeType: file.mimeType || 'application/octet-stream', state: file.state };
+  const done = await openai(`/uploads/${id}/complete`, { method: 'POST', json: { part_ids: [...partIdsFrom(req), part.id] } });
+  if (!done.file || !done.file.id) throw httpError(502, 'The processing service did not finish the file upload.');
+  return { name: done.file.id, uri: done.file.id };
 });

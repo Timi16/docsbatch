@@ -2,6 +2,6 @@
   "name": "docbatch",
   "version": "1.0.0",
   "private": true,
-  "description": "Drop files, say what to do, get a live answer per file with the Gemini API.",
+  "description": "Drop files, say what to do, get a live answer per file with the OpenAI API.",
   "engines": { "node": ">=20" }
 }

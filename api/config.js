@@ -8,7 +8,7 @@ module.exports = route(
     return {
       passwordRequired,
       authorized: !passwordRequired || checkAuth(req),
-      hasKey: !!(process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY),
+      hasKey: !!process.env.OPENAI_API_KEY,
     };
   },
   { method: 'GET', auth: false }

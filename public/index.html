@@ -2,92 +2,52 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>DocBatch · Process your files</title>
-  <meta name="description" content="Drop files, say what you want done, and get an answer for every file.">
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%237c5cff'/%3E%3Cpath d='M9 10h14M9 16h14M9 22h8' stroke='white' stroke-width='2.4' stroke-linecap='round'/%3E%3C/svg%3E">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>DocBatch</title>
+  <meta name="description" content="Chat, attach documents, and get an answer for every file.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%2314532d'/%3E%3Cpath d='M10 10h12M10 16h12M10 22h7' stroke='%23f5f1e8' stroke-width='2.6' stroke-linecap='round'/%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Onest:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-  <div class="glow" aria-hidden="true"></div>
-  <main class="wrap">
+  <div class="app" id="app">
 
-    <header class="top">
-      <div class="brand">
-        <span class="logo" aria-hidden="true">
-          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M5 7h14M5 12h14M5 17h8"/></svg>
-        </span>
-        DocBatch
+    <aside class="side" id="side" aria-label="Chats">
+      <div class="side-top">
+        <a class="brand" href="/" aria-label="DocBatch home">
+          <span class="logo" aria-hidden="true"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><path d="M5 7h14M5 12h14M5 17h8"/></svg></span>
+          DocBatch
+        </a>
+        <button type="button" class="icon-btn only-mobile" id="closeSide" aria-label="Close sidebar">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+        </button>
       </div>
-      <span class="pill" id="statusPill" hidden></span>
-    </header>
-
-    <section class="hero">
-      <h1>Drop files. Say what to do.<br><em>Get an answer for each one.</em></h1>
-      <p>PDFs, Word, Excel, PowerPoint, text files (.txt), images, scans, emails, code, zips and more. Every file gets a live answer, and long answers are finished automatically.</p>
-    </section>
-
-    <section class="card" id="filesCard">
-      <div class="dropzone" id="drop" tabindex="0" role="button" aria-label="Add files">
-        <svg viewBox="0 0 24 24" width="34" height="34" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5"/><path d="M4 15v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3"/></svg>
-        <strong>Drag files or folders here</strong>
-        <span>or click to browse · up to 150 files · 20 MB per upload</span>
+      <button type="button" class="new-chat" id="newChat">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
+        New chat
+      </button>
+      <input type="search" class="side-search" id="chatSearch" placeholder="Search chats" aria-label="Search chats">
+      <nav class="chat-list" id="chatList"></nav>
+      <div class="side-foot">
+        <p>Chats are saved in this browser only. Files and messages are sent to OpenAI; uploads are deleted after 48 hours.</p>
       </div>
-      <input type="file" id="fileInput" multiple hidden>
-      <input type="file" id="folderInput" webkitdirectory hidden>
+    </aside>
+    <div class="scrim" id="scrim" hidden></div>
 
-      <div class="filebar" id="fileBar" hidden>
-        <span id="fileCount"></span>
-        <span class="spacer"></span>
-        <button type="button" class="link" id="addFolder">Add folder</button>
-        <button type="button" class="link" id="clearFiles">Clear all</button>
-      </div>
-      <ul class="files" id="fileList"></ul>
-    </section>
-
-    <section class="card" id="taskCard">
-      <label for="task" class="lbl" id="taskLabel">What should be done with each file?</label>
-      <textarea id="task" rows="4" placeholder="e.g. Summarize this in 3 bullets, or: extract every name, email and phone number as JSON"></textarea>
-      <div class="chips" id="presets" aria-label="Example instructions"></div>
-
-      <div class="opts">
-        <label class="check"><input type="checkbox" id="useSearch" checked> Allow web search</label>
-      </div>
-
-      <div class="pwrow" id="pwRow" hidden>
-        <label for="pw">Access password</label>
-        <input type="password" id="pw" autocomplete="current-password" placeholder="Ask the site owner">
-      </div>
-
-      <div class="actions">
-        <button type="button" class="primary" id="runBtn">Run on all files</button>
-        <button type="button" class="ghost" id="rerunBtn" title="Reuses the previous files, prompt, and options" hidden>Run previous files again</button>
-        <span class="hint" id="runHint"></span>
-      </div>
-    </section>
-
-    <section class="card" id="progCard" hidden aria-live="polite">
-      <div class="prog-head">
-        <div>
-          <div class="prog-title" id="progTitle">Working…</div>
-          <div class="prog-sub" id="progSub"></div>
-        </div>
-        <strong class="prog-pct" id="progPct" hidden></strong>
-        <button type="button" class="ghost" id="cancelBtn" hidden>Stop</button>
-      </div>
-      <div class="bar" id="progBar"><i></i></div>
-      <div class="prog-meta" id="progMeta"></div>
-    </section>
-
-    <section id="resCard" hidden>
-      <div class="res-head">
-        <h2 id="resTitle">Results</h2>
-        <div class="res-tools">
-          <input type="search" id="resFilter" placeholder="Filter results…" aria-label="Filter results">
-          <button type="button" class="ghost" id="copyAll">Copy all</button>
-          <div class="menu">
-            <button type="button" class="ghost" id="dlBtn">Download ▾</button>
-            <div class="menu-list" id="dlMenu" hidden>
+    <main class="main" id="main">
+      <header class="bar">
+        <button type="button" class="icon-btn only-mobile" id="openSide" aria-label="Open sidebar">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h10"/></svg>
+        </button>
+        <h1 class="bar-title" id="chatTitle">New chat</h1>
+        <div class="bar-tools">
+          <div class="menu" id="exportMenuWrap" hidden>
+            <button type="button" class="icon-btn" id="exportBtn" aria-label="Download this chat" title="Download this chat">
+              <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11m0 0-4-4m4 4 4-4"/><path d="M5 19h14"/></svg>
+            </button>
+            <div class="menu-list" id="exportMenu" hidden>
               <button type="button" data-fmt="csv">CSV (Excel)</button>
               <button type="button" data-fmt="json">JSON</button>
               <button type="button" data-fmt="md">Markdown</button>
@@ -96,15 +56,57 @@
             </div>
           </div>
         </div>
-      </div>
-      <div id="resList"></div>
-    </section>
+      </header>
 
-    <footer>
-      <p>Your files are read in your browser; files and messages are sent to Google for processing. Uploaded files are deleted after 48 hours.</p>
-    </footer>
-  </main>
+      <section class="thread" id="thread" aria-live="polite">
+        <div class="hello" id="hello">
+          <h2>What are we working on<em>?</em></h2>
+          <p>Ask anything, or attach documents and say what to do with each one. PDFs, Word, Excel, PowerPoint, .txt, images, scans, emails, code and zips.</p>
+          <div class="suggest" id="suggest"></div>
+        </div>
+        <div class="msgs" id="msgs"></div>
+      </section>
 
+      <form class="composer-wrap" id="composerForm" autocomplete="off">
+        <div class="pw" id="pwRow" hidden>
+          <label for="pw">Access password</label>
+          <input type="password" id="pw" autocomplete="current-password" placeholder="Ask the site owner">
+        </div>
+        <div class="composer" id="composer">
+          <ul class="attach-list" id="attachList" hidden></ul>
+          <textarea id="input" rows="1" placeholder="Message DocBatch" aria-label="Message"></textarea>
+          <div class="composer-row">
+            <button type="button" class="icon-btn attach" id="attachBtn" aria-label="Attach files" title="Attach files or a folder">
+              <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21 11-8.6 8.6a5.5 5.5 0 0 1-7.8-7.8l8.9-8.9a3.7 3.7 0 0 1 5.2 5.2l-8.9 8.9a1.8 1.8 0 0 1-2.6-2.6L15.5 6.5"/></svg>
+            </button>
+            <div class="menu" id="attachMenuWrap">
+              <div class="menu-list up" id="attachMenu" hidden>
+                <button type="button" id="pickFiles">Upload files</button>
+                <button type="button" id="pickFolder">Upload a folder</button>
+              </div>
+            </div>
+            <button type="button" class="toggle on" id="searchToggle" aria-pressed="true" title="Let the model search the web">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.8 3 2.8 15 0 18M12 3c-2.8 3-2.8 15 0 18"/></svg>
+              Web search
+            </button>
+            <span class="spacer"></span>
+            <button type="submit" class="send" id="sendBtn" aria-label="Send" disabled>
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5m0 0-6 6m6-6 6 6"/></svg>
+            </button>
+            <button type="button" class="send stop" id="stopBtn" aria-label="Stop" hidden>
+              <svg viewBox="0 0 24 24" width="14" height="14"><rect x="5" y="5" width="14" height="14" rx="2.5" fill="currentColor"/></svg>
+            </button>
+          </div>
+        </div>
+        <p class="fine">Each attached file gets its own answer. Long tasks keep going until they are finished.</p>
+      </form>
+
+      <div class="drop-veil" id="dropVeil" hidden><div><strong>Drop files to attach</strong><span>Up to 150 files · 20 MB each</span></div></div>
+    </main>
+  </div>
+
+  <input type="file" id="fileInput" multiple hidden>
+  <input type="file" id="folderInput" webkitdirectory hidden>
   <div id="toast" role="status" aria-live="polite"></div>
   <script src="/extract.js"></script>
   <script src="/app.js"></script>
