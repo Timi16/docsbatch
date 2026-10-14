@@ -14,6 +14,7 @@ browser, so nobody sees anyone else's chats. Set `APP_PASSWORD` so only people y
 3. **Settings > Environment Variables**, add:
    - `OPENAI_API_KEY` (required): from https://platform.openai.com/api-keys
    - `APP_PASSWORD` (strongly recommended): without it, anyone with the link can spend your credit
+   - `TAVILY_API_KEY` (needed for web search): from https://tavily.com; the free plan covers 1,000 searches a month
    - `OPENAI_MODELS` (optional): comma-separated list of allowed models; `gpt-6-luna` is used by default when allowed
 4. Redeploy so the variables take effect.
 
@@ -30,7 +31,8 @@ Local test: `npx vercel dev` with a `.env.local` copied from `.env.example`.
   folders anywhere on the page. With files attached, your message is the instruction for each file.
 - **Follow-ups:** the model sees the earlier messages and answers in the chat, so "now make that a table" works.
   It does not see files attached to earlier messages, only the answers about them.
-- **Web search:** the toggle in the chat box. On by default.
+- **Web search:** the toggle in the chat box. On by default. Searches run only through Tavily; OpenAI's own web
+  search (billed per search) is never used. Without `TAVILY_API_KEY`, searching is refused with a message.
 - **Live progress:** answers stream in as they are written. Above each answer a line shows what the model is doing
   (Thinking, Searching the web, Writing). Click it to see every search it ran and the sites it found; when it is
   done it sums up, e.g. "Searched the web 8 times · 25 sites · 50s". Sources sit behind a **Sources** button.
@@ -56,6 +58,8 @@ Each request only references the uploaded files, so it stays small however big t
 
 An answer that does not fit in one request is continued automatically:
 
+- Web searches are function calls the server answers with Tavily results (5 short snippets each), so the model
+  only pays for the text it reads.
 - For research on many items, such as a list of leads, the model does 8 items per turn and ends the turn with
   `[[CONTINUE]]`. The page then sends back the answer so far and asks for the next items, up to 100 turns per file.
 - The same happens when the model hits its output limit or the function gets close to its time limit. If a research
@@ -90,7 +94,10 @@ password-protected files.
   **Continue**.
 - Chats live in the browser's local storage. Clearing site data deletes them, and they do not sync between devices.
   When storage is full, the oldest chats are dropped first.
-- Web search is billed separately by OpenAI per search.
+- **Cost:** with `gpt-6-luna` the model itself is cheap: a 12-lead research test used about $0.004 of OpenAI credit and
+  23 Tavily searches. Searches are the limit: each costs 1 Tavily credit (1,000 free a month, then $0.008 each), and
+  each request is capped at 16 searches. A 200-lead list with a second REVIEW pass needs roughly 300–400.
+  Set a monthly budget limit in your OpenAI settings as a safety net.
 
 ## Files
 

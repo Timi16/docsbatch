@@ -150,7 +150,7 @@ async function openaiStream(json, { softMs, hardMs, onProgress = () => {} }) {
     const r = await fetch(`${BASE}/responses`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${apiKey()}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...json, stream: true, ...(json.tools ? { include: ['web_search_call.action.sources'] } : {}) }),
+      body: JSON.stringify({ ...json, stream: true }),
       signal: ctrl.signal,
     });
     if (!r.ok) {
@@ -195,6 +195,42 @@ async function openaiStream(json, { softMs, hardMs, onProgress = () => {} }) {
   return { response, text, timedOut: timedOut && !response };
 }
 
+// Web search runs only through Tavily (free plan: 1,000 searches a month). OpenAI's built-in search is
+// never used: it is billed per search and cost far more. The model calls this as a function tool.
+const SEARCH_TOOL = {
+  type: 'function',
+  name: 'web_search',
+  description: 'Search the web. Returns up to 5 results with title, url and a text snippet. Use one short, specific query per company or fact; one search per company is usually enough. Do not repeat a search.',
+  parameters: { type: 'object', properties: { query: { type: 'string', description: 'The search query' } }, required: ['query'], additionalProperties: false },
+  strict: true,
+};
+const useTavily = () => !!process.env.TAVILY_API_KEY;
+
+// One basic search (1 Tavily credit), trimmed to what the model needs so it costs few tokens.
+async function tavilySearch(query) {
+  const r = await fetch('https://api.tavily.com/search', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.TAVILY_API_KEY}` },
+    body: JSON.stringify({ query: String(query).slice(0, 300), search_depth: 'basic', max_results: 5 }),
+  });
+  let data = {};
+  try { data = await r.json(); } catch { /* use the status */ }
+  // Out of credits will not fix itself; a bad key must not look like a wrong app password (401).
+  if (r.status === 432 || r.status === 433) throw httpError(402, 'The monthly web searches (Tavily) are used up. They reset next month, or add credit at tavily.com.');
+  if (r.status === 401 || r.status === 403) throw httpError(403, 'The web search key is not valid. Ask the site owner.');
+  if (!r.ok) {
+    const detail = data.detail && (data.detail.error || data.detail);
+    return { error: typeof detail === 'string' ? detail : `Search failed (${r.status})` };
+  }
+  return {
+    results: (data.results || []).slice(0, 5).map((x) => ({
+      title: String(x.title || '').slice(0, 150),
+      url: String(x.url || ''),
+      content: String(x.content || '').replace(/\s+/g, ' ').slice(0, 500),
+    })),
+  };
+}
+
 function cleanTask(task) {
   if (typeof task !== 'string' || !task.trim()) throw httpError(400, 'Type what you want done with each file.');
   return task.trim().slice(0, 8000);
@@ -232,7 +268,7 @@ function buildRequest(task, item, useSearch) {
     instructions: SYSTEM + (useSearch ? SEARCH_NOTE : ''),
     input: [{ role: 'user', content }],
   };
-  if (useSearch) req.tools = [{ type: 'web_search' }];
+  if (useSearch) req.tools = [SEARCH_TOOL];
   return req;
 }
 
@@ -269,6 +305,6 @@ function normalize(r) {
 
 module.exports = {
   BASE, MAX_UPLOAD_CHUNK_BYTES, MAX_FILE_BYTES, FILE_TTL_SECONDS, SYSTEM, SEARCH_NOTE, FINISH, MORE, ITEMS_PER_TURN,
-  httpError, allowedModels, apiKey, checkAuth, route, streamRoute, openai, openaiStream,
+  httpError, allowedModels, apiKey, checkAuth, route, streamRoute, openai, openaiStream, SEARCH_TOOL, useTavily, tavilySearch,
   cleanTask, cleanModel, cleanItem, buildRequest, normalize,
 };

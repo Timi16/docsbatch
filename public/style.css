@@ -175,6 +175,56 @@ button { cursor: pointer; }
 .step.part { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }
 .face { flex: none; width: 17px; height: 17px; border-radius: 50%; display: grid; place-items: center; font: 600 9.5px/1 var(--sans); color: #fff; text-transform: uppercase; }
 
+/* lead tables */
+.records { border: 1px solid var(--line); border-radius: 14px; background: var(--panel); overflow: hidden; margin: 4px 0 2px; }
+.answer.multi .records { margin-top: 8px; }
+.rec-head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; padding: 12px 14px 10px; }
+.rec-stats { display: flex; align-items: baseline; gap: 2px; color: var(--ink2); font-size: 14px; }
+.rec-stats b { font: 400 26px/1 var(--serif); color: var(--ink); margin-right: 4px; }
+.rec-live { margin-left: 10px; font-size: 12.5px; color: var(--accent); animation: pulse 1.4s ease-in-out infinite; }
+.rec-tabs { display: inline-flex; gap: 2px; background: var(--side); border: 1px solid var(--line); border-radius: 10px; padding: 3px; }
+.rec-tab { display: inline-flex; align-items: center; gap: 6px; border: 0; background: none; border-radius: 7px; padding: 4px 10px; font-size: 13px; color: var(--ink2); cursor: pointer; }
+.rec-tab span { font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.rec-tab.on { background: var(--panel); color: var(--ink); box-shadow: 0 1px 2px rgb(0 0 0 / 8%); }
+.rec-bar { display: flex; height: 4px; background: var(--line); }
+.rec-bar i { display: block; height: 100%; transition: width .4s; }
+.rec-bar .ok { background: var(--accent); }
+.rec-bar .rev { background: #d29a2a; }
+.rec-scroll { max-height: 560px; overflow: auto; }
+.rec-table { width: 100%; border-collapse: collapse; font-size: 13.5px; table-layout: fixed; }
+.rec-table .c-n { width: 52px; }
+.rec-table .c-name { width: 17%; }
+.rec-table .c-exec { width: 25%; }
+.rec-table .c-co { width: 25%; }
+.rec-table td { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rec-table .name .dom { display: none; }
+.rec-table th { position: sticky; top: 0; z-index: 1; background: var(--side); text-align: left; font-weight: 500; font-size: 12px; color: var(--muted); padding: 8px 12px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+.rec-table td { padding: 8px 12px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+.rec-table tbody tr:last-child td { border-bottom: 0; }
+.rec-table tbody tr:hover td { background: color-mix(in srgb, var(--hover) 55%, transparent); }
+.rec-table td.n { color: var(--muted); font-variant-numeric: tabular-nums; font-size: 12px; text-overflow: clip; }
+.rec-table .name { font-weight: 500; }
+.rec-table td.email { font: 12.5px var(--mono); color: var(--ink2); }
+.rec-table .exec { font-weight: 500; }
+.co-chip { display: inline-flex; align-items: center; gap: 7px; color: var(--ink2); white-space: nowrap; max-width: 100%; }
+.co-chip span:last-child { overflow: hidden; text-overflow: ellipsis; }
+.rev-tag { display: inline-block; font-size: 11.5px; font-weight: 500; color: #8a5a00; background: #fbefd6; border-radius: 999px; padding: 2px 9px; }
+.rec-table .empty-row { text-align: center; color: var(--muted); padding: 18px; }
+.rec-notes { border-top: 1px solid var(--line); padding: 10px 14px; font-size: 13px; color: var(--ink2); background: var(--side); }
+.rec-notes p { margin: 0; }
+@media (prefers-color-scheme: dark) {
+  .rev-tag { color: #f0c46c; background: #3a2d12; }
+}
+@media (max-width: 860px) {
+  .rec-table .email, .rec-table .co, .rec-table .c-email, .rec-table .c-co { display: none; }
+  .rec-table .c-n { width: 40px; }
+  .rec-table .c-name { width: 46%; }
+  .rec-table .c-exec { width: auto; }
+  .rec-table .exec { white-space: normal; }
+  .rec-table .name .dom { display: block; font-weight: 400; font-size: 11.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; }
+  .rec-table td, .rec-table th { padding: 8px 9px; }
+}
+
 /* sources, collapsed by default */
 .answer-tools { align-items: center; flex-wrap: wrap; }
 .sources-btn { display: inline-flex !important; align-items: center; gap: 7px; border: 1px solid var(--line) !important; border-radius: 999px !important; padding: 3px 11px 3px 4px !important; color: var(--ink2) !important; }

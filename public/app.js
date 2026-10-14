@@ -35,6 +35,7 @@
     formatterNoticeShown: false,
     openTraces: new Set(),
     openSources: new Set(),
+    recFilter: new Map(),
     renamingId: null,
     menuChatId: null,
     sideCollapsed: localStorage.getItem(LS_SIDE) === 'closed',
@@ -569,28 +570,100 @@
     return [button, panel];
   }
 
+  // Lead-style answers are shown as a table instead of plain lines. A record is "Name email Executive" on
+  // one line, or the same split over three lines. When a later pass lists a lead again (e.g. a REVIEW pass),
+  // its newer result replaces the earlier one in place, so the table is always the merged, final list.
+  const EMAIL = /^[^\s@<>()]+@[^\s@<>()]+\.[a-z]{2,}$/i;
+  function parseRecords(text) {
+    const lines = String(text || '').split('\n').map((l) => l.trim().replace(/^(?:[-*•]|\d+[.)])\s+/, '').replace(/\*\*/g, '')).filter(Boolean);
+    const found = [];
+    const other = [];
+    for (let k = 0; k < lines.length; k++) {
+      const tokens = lines[k].split(/\s+/);
+      const at = tokens.findIndex((t) => EMAIL.test(t));
+      const rest = at > 0 ? tokens.slice(at + 1).join(' ').replace(/^[-–—:|,]\s*/, '').trim() : '';
+      if (at > 0 && at <= 3 && rest) {
+        found.push({ name: tokens.slice(0, at).join(' '), email: tokens[at], exec: rest });
+      } else if (k + 2 < lines.length && tokens.length <= 3 && !lines[k].includes('@') && EMAIL.test(lines[k + 1]) && !lines[k + 2].includes('@')) {
+        found.push({ name: lines[k], email: lines[k + 1], exec: lines[k + 2] });
+        k += 2;
+      } else other.push(lines[k]);
+    }
+    if (found.length < 3 || found.length * 3 < (found.length + other.length) * 1.5) return null;
+    const rows = [];
+    const byEmail = new Map();
+    for (const f of found) {
+      const row = { ...f, domain: f.email.split('@')[1].toLowerCase(), review: /^review\b/i.test(f.exec) };
+      const key = f.email.toLowerCase();
+      const seen = byEmail.get(key);
+      if (!seen) { byEmail.set(key, row); rows.push(row); } else if (!row.review || seen.review) Object.assign(seen, row);
+    }
+    return { rows, other };
+  }
+
+  function renderRecords(chat, msg, i, parsed) {
+    const key = `${msg.id}:${i}`;
+    const filter = state.recFilter.get(key) || 'all';
+    const { rows, other } = parsed;
+    const review = rows.filter((r) => r.review).length;
+    const verified = rows.length - review;
+    const working = msg.results[i].state === 'working';
+    const setFilter = (f) => { state.recFilter.set(key, f); paintResult(chat, msg, i); };
+    const tab = (f, label, n) => el('button', { type: 'button', class: 'rec-tab' + (filter === f ? ' on' : ''), 'aria-pressed': String(filter === f), onclick: () => setFilter(f) }, label, el('span', { text: String(n) }));
+    const shown = rows.map((r, n) => ({ ...r, n: n + 1 })).filter((r) => filter === 'all' || (filter === 'rev' ? r.review : !r.review));
+    return el('div', { class: 'records' },
+      el('div', { class: 'rec-head' },
+        el('div', { class: 'rec-stats' },
+          el('b', { text: String(rows.length) }), el('span', { text: rows.length === 1 ? ' lead' : ' leads' }),
+          working ? el('span', { class: 'rec-live', text: 'filling in…' }) : null),
+        el('div', { class: 'rec-tabs', role: 'group', 'aria-label': 'Filter rows' }, tab('all', 'All', rows.length), tab('ok', 'Verified', verified), tab('rev', 'Review', review))),
+      el('div', { class: 'rec-bar', title: `${verified} verified, ${review} to review` },
+        el('i', { class: 'ok', style: `width:${(verified / rows.length) * 100}%` }),
+        el('i', { class: 'rev', style: `width:${(review / rows.length) * 100}%` })),
+      el('div', { class: 'rec-scroll' },
+        el('table', { class: 'rec-table' },
+          el('colgroup', {}, ['n', 'name', 'exec', 'co', 'email'].map((c) => el('col', { class: 'c-' + c }))),
+          el('thead', {}, el('tr', {}, [['#', 'n'], ['Name', 'name'], ['Top executive', 'exec'], ['Company', 'co'], ['Email', 'email']].map(([h, c]) => el('th', { class: c, text: h })))),
+          el('tbody', {}, shown.length ? shown.map((r) => el('tr', { class: r.review ? 'is-rev' : '' },
+            el('td', { class: 'n', text: String(r.n) }),
+            el('td', { class: 'name', title: r.name }, el('span', { text: r.name }), el('small', { class: 'dom', text: r.domain })),
+            el('td', { class: 'exec', title: r.review ? 'Not verified yet' : r.exec }, r.review ? el('span', { class: 'rev-tag', text: 'Review' }) : el('span', { text: r.exec })),
+            el('td', { class: 'co', title: r.domain }, el('span', { class: 'co-chip' }, face(r.domain), el('span', { text: r.domain }))),
+            el('td', { class: 'email', title: r.email, text: r.email }))) :
+            el('tr', {}, el('td', { class: 'empty-row', colspan: '5', text: 'Nothing here.' }))))),
+      other.length ? el('div', { class: 'rec-notes' }, other.map((line) => el('p', { text: line.replace(/\*\*/g, '') }))) : null);
+  }
+  function recordsCsv(name, parsed) {
+    const esc = (v) => '"' + String(v ?? '').replace(/"/g, '""') + '"';
+    const lines = ['name,email,company,top_executive,status'];
+    for (const r of parsed.rows) lines.push([r.name, r.email, r.domain, r.review ? '' : r.exec, r.review ? 'review' : 'verified'].map(esc).join(','));
+    download(`${String(name || 'leads').replace(/[^\w-]+/g, '-').slice(0, 60)}.csv`, '\ufeff' + lines.join('\r\n'), 'text/csv;charset=utf-8');
+  }
+
   function renderResult(chat, msg, i) {
     const r = msg.results[i];
     const multi = msg.kind === 'files';
     const body = el('div', { class: 'md' });
     const ok = !r.error;
     const text = r.error ? r.error : tidy(r.text);
+    const records = !r.error && text ? parseRecords(text) : null;
     const [sourcesBtn, sourcesPanel] = renderSources(chat, msg, i);
     const tools = el('div', { class: 'answer-tools' });
     if (r.state !== 'working' && (r.text || r.error)) tools.append(el('button', { type: 'button', onclick: () => copyText(r.text || r.error) }, 'Copy'));
     if (r.state !== 'working' && r.text) tools.append(el('button', { type: 'button', title: 'Download this answer as a PDF', onclick: () => downloadPdf(multi ? r.name : chat.title, [{ text: r.text, sources: r.sources }]) }, 'PDF'));
+    if (records && r.state !== 'working') tools.append(el('button', { type: 'button', title: 'Download this table as CSV', onclick: () => recordsCsv(multi ? r.name : chat.title, records) }, 'CSV'));
     if ((r.state === 'stopped' || r.state === 'failed') && !state.busy && canResume(msg, r)) {
       tools.append(el('button', { type: 'button', onclick: () => resume(chat.id, msg.id, i) }, r.text ? 'Continue' : 'Retry'));
     }
     if (sourcesBtn && r.state !== 'working') tools.append(sourcesBtn);
     const parts = [
       renderTrace(chat, msg, i),
-      text ? body : null,
+      records ? renderRecords(chat, msg, i, records) : text ? body : null,
       r.warning ? el('p', { class: 'warn', text: r.warning }) : null,
       tools.childElementCount ? tools : null,
       r.state !== 'working' ? sourcesPanel : null,
     ];
-    if (text) renderAnswer(body, text);
+    if (text && !records) renderAnswer(body, text);
     const key = `${msg.id}:${i}`;
     if (!multi) return el('div', { class: 'answer' + (ok ? '' : ' bad'), 'data-key': key }, parts);
 
