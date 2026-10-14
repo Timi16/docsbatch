@@ -66,6 +66,51 @@ function route(fn, { method = 'POST', auth = true } = {}) {
   };
 }
 
+// Like route(), but the result streams back as one JSON event per line, so the page can show progress
+// while the model works. The last line is {type: 'done', ...result} or {type: 'error', status, error}.
+function streamRoute(fn) {
+  return async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    if (req.method !== 'POST') {
+      res.setHeader('Allow', 'POST');
+      return res.status(405).json({ error: 'Method not allowed' });
+    }
+    if (!checkAuth(req)) return res.status(401).json({ error: 'Wrong or missing password.' });
+    res.statusCode = 200;
+    res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
+    res.setHeader('X-Accel-Buffering', 'no');
+    const emit = (event) => res.write(JSON.stringify(event) + '\n');
+    const ping = setInterval(() => emit({ type: 'ping' }), 15000); // keeps quiet stretches of research alive
+    try {
+      emit({ type: 'done', ...(await fn(req, emit)) });
+    } catch (e) {
+      const status = Number.isInteger(e.status) ? e.status : 500;
+      if (status >= 500) console.error(e);
+      emit({ type: 'error', status, error: e.message || 'Server error' });
+    } finally {
+      clearInterval(ping);
+      res.end();
+    }
+  };
+}
+
+// The progress worth showing from one Responses stream event, or null.
+function progressOf(event) {
+  if (event.type === 'response.output_text.delta') return { type: 'text', delta: event.delta || '' };
+  if (event.type === 'response.reasoning_summary_text.delta') return { type: 'think', delta: event.delta || '' };
+  if (event.type === 'response.output_item.added' && event.item && event.item.type === 'reasoning') return { type: 'think' };
+  if (event.type === 'response.web_search_call.searching') return { type: 'searching' };
+  if (event.type === 'response.output_item.done' && event.item && event.item.type === 'web_search_call') {
+    const a = event.item.action || {};
+    const urls = (a.sources || []).map((s) => s && s.url).filter((u) => /^https?:\/\//.test(u || '')).slice(0, 8);
+    if (a.type === 'open_page' && a.url) return { type: 'open', url: a.url };
+    if (a.type === 'find_in_page' && a.url) return { type: 'find', url: a.url, pattern: String(a.pattern || '').slice(0, 120) };
+    const queries = (a.queries && a.queries.length ? a.queries : [a.query]).filter(Boolean).map((q) => String(q).slice(0, 200)).slice(0, 4);
+    return queries.length ? { type: 'search', queries, urls } : null;
+  }
+  return null;
+}
+
 function upstreamError(status, data) {
   const err = (data && data.error) || {};
   const msg = err.message || `Processing API error (${status})`;
@@ -94,7 +139,7 @@ async function openai(path, { method = 'GET', json, body } = {}) {
 // Streams one response so a long one can be cut before the function times out. Reading stops at softMs
 // once some of the answer has arrived, or at hardMs regardless. Returns the final response when it
 // arrived, plus the text streamed so far for when it did not.
-async function openaiStream(json, { softMs, hardMs }) {
+async function openaiStream(json, { softMs, hardMs, onProgress = () => {} }) {
   const ctrl = new AbortController();
   const started = Date.now();
   const hard = setTimeout(() => ctrl.abort(), hardMs);
@@ -105,7 +150,7 @@ async function openaiStream(json, { softMs, hardMs }) {
     const r = await fetch(`${BASE}/responses`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${apiKey()}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...json, stream: true }),
+      body: JSON.stringify({ ...json, stream: true, ...(json.tools ? { include: ['web_search_call.action.sources'] } : {}) }),
       signal: ctrl.signal,
     });
     if (!r.ok) {
@@ -125,6 +170,8 @@ async function openaiStream(json, { softMs, hardMs }) {
         if (!line.startsWith('data:')) continue;
         let event;
         try { event = JSON.parse(line.slice(5)); } catch { continue; }
+        const progress = progressOf(event);
+        if (progress) onProgress(progress);
         if (event.type === 'response.output_text.delta') text += event.delta || '';
         else if (['response.completed', 'response.incomplete', 'response.failed'].includes(event.type)) response = event.response;
         else if (event.type === 'error') throw upstreamError(event.code === 'insufficient_quota' ? 429 : 502, { error: event });
@@ -222,6 +269,6 @@ function normalize(r) {
 
 module.exports = {
   BASE, MAX_UPLOAD_CHUNK_BYTES, MAX_FILE_BYTES, FILE_TTL_SECONDS, SYSTEM, SEARCH_NOTE, FINISH, MORE, ITEMS_PER_TURN,
-  httpError, allowedModels, apiKey, checkAuth, route, openai, openaiStream,
+  httpError, allowedModels, apiKey, checkAuth, route, streamRoute, openai, openaiStream,
   cleanTask, cleanModel, cleanItem, buildRequest, normalize,
 };

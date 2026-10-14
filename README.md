@@ -24,16 +24,21 @@ Local test: `npx vercel dev` with a `.env.local` copied from `.env.example`.
 
 ## Using it
 
-- **Sidebar:** your chats, newest first, grouped by day. Search, open, or delete them. **New chat** (or ⌘/Ctrl+Shift+O)
-  starts over.
+- **Sidebar:** your chats, newest first, grouped by day. Search them, and use **⋯** to rename or delete one.
+  **New chat** (or ⌘/Ctrl+Shift+O) starts over. The panel button hides the sidebar on wide screens.
 - **Chat box:** type and press Enter (Shift+Enter for a new line). Attach files with the paperclip, or drop files or
   folders anywhere on the page. With files attached, your message is the instruction for each file.
 - **Follow-ups:** the model sees the earlier messages and answers in the chat, so "now make that a table" works.
   It does not see files attached to earlier messages, only the answers about them.
-- **Web search:** the toggle in the chat box. On by default; answers list their sources underneath.
+- **Web search:** the toggle in the chat box. On by default.
+- **Live progress:** answers stream in as they are written. Above each answer a line shows what the model is doing
+  (Thinking, Searching the web, Writing). Click it to see every search it ran and the sites it found; when it is
+  done it sums up, e.g. "Searched the web 8 times · 25 sites · 50s". Sources sit behind a **Sources** button.
 - **Stop / Continue:** Stop ends a run and keeps what was written. **Continue** picks up a stopped answer where it
   left off; **Retry** reruns a failed one. Uploaded files can be reused this way for 40 hours.
-- **Download:** the arrow at the top right saves every answer in the chat as CSV, JSON, Markdown, plain text or PDF.
+- **Download:** the arrow at the top right saves the chat as a PDF file (your messages and every answer), or every
+  answer as CSV, JSON, Markdown or plain text. Each answer also has its own **PDF** button. PDFs use a standard font,
+  so text in non-Latin scripts may not show correctly in them.
 
 ## How it works
 
@@ -42,6 +47,7 @@ browser                         Vercel functions (hold the key)          OpenAI
 -------                         --------------------------------         ------
 read each file, make text   ->  /api/upload  (4 MB chunks)           ->  Uploads API (files expire after 48 h)
 one request per file        ->  /api/instant (file ids or message)  ->  Responses API, streamed
+progress as it happens      <-  one JSON event per line (searches, text, then the result)
 answer cut off? ask again   ->  /api/instant (with the text so far) ->  Responses API, streamed
 ```
 

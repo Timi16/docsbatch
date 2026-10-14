@@ -1,5 +1,5 @@
 'use strict';
-const { route, checkAuth } = require('./_lib');
+const { route, checkAuth, cleanModel } = require('./_lib');
 
 // Tells the page which models exist and whether a password is needed. Never returns the key.
 module.exports = route(
@@ -9,6 +9,7 @@ module.exports = route(
       passwordRequired,
       authorized: !passwordRequired || checkAuth(req),
       hasKey: !!process.env.OPENAI_API_KEY,
+      model: cleanModel(),
     };
   },
   { method: 'GET', auth: false }

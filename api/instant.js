@@ -1,5 +1,5 @@
 'use strict';
-const { route, openaiStream, httpError, cleanTask, cleanModel, cleanItem, buildRequest, normalize, SEARCH_NOTE, FINISH, MORE, ITEMS_PER_TURN } = require('./_lib');
+const { streamRoute, openaiStream, httpError, cleanTask, cleanModel, cleanItem, buildRequest, normalize, SEARCH_NOTE, FINISH, MORE, ITEMS_PER_TURN } = require('./_lib');
 
 const MESSAGE_SYSTEM = 'You are a precise, thorough assistant. Follow the user’s instructions and requested output format exactly. Preserve all requested details; do not replace a requested result with a generic summary. Use supplied information and enabled search, distinguish verified facts from uncertainty, and never invent facts or claim access to files that were not provided. If essential input is missing, say exactly what is missing and ask only for that input. Be concise only when requested or when the task calls for it. ' + FINISH;
 const CONTINUE = 'Your answer so far is above and is not finished. Continue it from the exact character where it stops. Do not repeat anything already written, do not add an introduction, a note about continuing, or any status line or count between items, and keep the same format. Carry on until the whole task is finished.';
@@ -36,9 +36,9 @@ function dropOverlap(prior, next) {
   return next;
 }
 
-// One live answer for a message or a file. A long answer comes back with incomplete: true;
-// the page then sends what it has as `prior` and gets the next piece.
-module.exports = route(async (req) => {
+// One live answer for a message or a file, streamed as progress events (thinking, searches, text).
+// A long answer ends with incomplete: true; the page then sends what it has as `prior` and gets the next piece.
+module.exports = streamRoute(async (req, emit) => {
   const b = req.body && typeof req.body === 'object' ? req.body : {};
   const model = cleanModel(b.model);
   const useSearch = !!b.useSearch;
@@ -63,7 +63,7 @@ module.exports = route(async (req) => {
     request.input.push({ role: 'user', content: SLOWER.trim() });
   }
 
-  const { response, text: streamed, timedOut } = await openaiStream({ model, ...request }, { softMs: SOFT_MS, hardMs: HARD_MS });
+  const { response, text: streamed, timedOut } = await openaiStream({ model, ...request }, { softMs: SOFT_MS, hardMs: HARD_MS, onProgress: emit });
   const out = response ? normalize(response) : { text: streamed, sources: [], cut: false };
   if (prior.trim()) out.text = dropOverlap(prior, out.text);
   const cut = out.cut;

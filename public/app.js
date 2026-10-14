@@ -9,6 +9,8 @@
   const UPLOAD_REUSE_MS = 40 * 3600 * 1000; // uploads delete themselves after 48 h
   const LS_CHATS = 'docbatch.chats.v2';
   const LS_SEARCH = 'docbatch.search';
+  const LS_SIDE = 'docbatch.side';
+  const MAX_TRACE = 300;
   const SS_PW = 'docbatch.pw';
   const MAX_CHATS = 200;
   const SUGGESTIONS = [
@@ -31,12 +33,18 @@
     useSearch: localStorage.getItem(LS_SEARCH) !== 'off',
     nextId: 1,
     formatterNoticeShown: false,
+    openTraces: new Set(),
+    openSources: new Set(),
+    renamingId: null,
+    menuChatId: null,
+    sideCollapsed: localStorage.getItem(LS_SIDE) === 'closed',
   };
   const formatterLoads = {};
   const FORMATTER_SCRIPTS = {
     markdown: 'https://cdn.jsdelivr.net/npm/marked@15.0.7/marked.min.js',
     sanitize: 'https://cdn.jsdelivr.net/npm/dompurify@3.2.6/dist/purify.min.js',
     math: 'https://cdn.jsdelivr.net/npm/mathjax@3.2.2/es5/tex-chtml.js',
+    pdf: 'https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js',
   };
 
   // ---- small helpers -----------------------------------------------------
@@ -55,6 +63,20 @@
   const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
   const fmtSize = (n) => (n < 1024 ? n + ' B' : n < 1048576 ? (n / 1024).toFixed(0) + ' KB' : (n / 1048576).toFixed(1) + ' MB');
   const extOf = (name) => (window.Extract.ext(name) || 'file').slice(0, 4);
+  const host = (url) => { try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return String(url).slice(0, 40); } };
+  const fmtDur = (s) => (s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, '0')}s`);
+  // A small letter badge per site, coloured from its name, instead of fetching favicons from a third party.
+  function face(h) {
+    let n = 0;
+    for (const ch of h) n = (n * 31 + ch.charCodeAt(0)) >>> 0;
+    return el('span', { class: 'face', style: `background:hsl(${n % 360} 42% 42%)`, 'aria-hidden': 'true', text: h.replace(/^www\./, '')[0] || '?' });
+  }
+  // Hides the pacing marker, including a half-streamed one at the very end.
+  function tidy(text) {
+    const t = String(text || '').replace(/\[\[CONTINUE\]\]/g, '');
+    const i = t.lastIndexOf('[[');
+    return i >= 0 && '[[CONTINUE]]'.startsWith(t.slice(i)) ? t.slice(0, i) : t;
+  }
 
   let toastTimer;
   function toast(msg, kind = 'error') {
@@ -118,10 +140,48 @@
     const until = Date.now() + ms;
     while (Date.now() < until && !state.cancelRequested) await sleep(Math.min(250, until - Date.now()));
   }
+  // Sends one request and reads its progress events as they arrive; resolves with the final result.
+  async function streamInstant(json, onEvent) {
+    const h = { 'Content-Type': 'application/json' };
+    if (state.pw) h['x-app-password'] = state.pw;
+    const res = await fetch('/api/instant', { method: 'POST', headers: h, body: JSON.stringify(json), signal: state.abort.signal });
+    if (!res.ok) {
+      let data = null;
+      try { data = await res.json(); } catch { /* use the status */ }
+      const err = new Error((data && data.error) || `Request failed (${res.status})`);
+      err.status = res.status;
+      throw err;
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let nl;
+      while ((nl = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, nl).trim();
+        buf = buf.slice(nl + 1);
+        if (!line) continue;
+        let event;
+        try { event = JSON.parse(line); } catch { continue; }
+        if (event.type === 'done') return event;
+        if (event.type === 'error') {
+          const err = new Error(event.error || 'Server error');
+          err.status = event.status;
+          throw err;
+        }
+        onEvent(event);
+      }
+    }
+    throw new Error('The connection closed before the answer finished.');
+  }
+
   // One live answer. Failed requests are retried, and an answer that was cut off is continued
-  // from where it stopped until it is finished, with no action from the user. onText gets the
-  // text so far after every piece, so a stopped answer keeps what it had.
-  async function ask(payload, { note, onText, prior = '' }) {
+  // from where it stopped until it is finished, with no action from the user. Progress events
+  // (thinking, searches) go to onEvent; the text so far goes to onText as it streams.
+  async function ask(payload, { note, onEvent, onText, prior = '' }) {
     let text = prior;
     const sources = [];
     let attempt = 0;
@@ -130,12 +190,17 @@
       let result;
       while (!result) {
         if (state.cancelRequested) throw STOPPED;
+        let live = '';
         try {
-          result = await api('instant', { method: 'POST', json: { ...payload, ...(text ? { prior: text } : {}), ...(slower ? { slower } : {}) }, signal: state.abort.signal });
+          result = await streamInstant({ ...payload, ...(text ? { prior: text } : {}), ...(slower ? { slower } : {}) }, (event) => {
+            if (event.type === 'text') { live += event.delta; onText(text + live, sources, true); }
+            else if (event.type !== 'ping') onEvent(event);
+          });
           if (result.error) throw new Error(result.error);
         } catch (e) {
           if (state.cancelRequested) throw STOPPED;
           if (e.status === 401) throw e;
+          if (live) onText(text, sources, false); // drop the half-streamed piece; it is asked for again
           // Retrying cannot fix a rejected request (bad input, no credit left): keep what was written and stop.
           if (e.status >= 400 && e.status < 500 && e.status !== 408 && e.status !== 429) {
             if (!text.trim()) throw e;
@@ -153,10 +218,10 @@
       for (const source of result.sources || []) {
         if (!sources.some((seen) => seen.uri === source.uri)) sources.push(source);
       }
-      onText(text, sources);
+      onText(text, sources, false);
       if (!result.incomplete) return { text: text.trim(), warning: result.warning, sources };
       if (pieces >= MAX_PIECES) return { text: text.trim(), warning: 'This answer was too long to finish and stops early.', sources };
-      note('Working through a long task…');
+      onEvent({ type: 'part', n: pieces + 1 });
     }
   }
   function stopRun() {
@@ -307,7 +372,7 @@
     const q = $('#chatSearch').value.trim().toLowerCase();
     const chats = state.chats.filter((c) => !q || c.title.toLowerCase().includes(q));
     if (!chats.length) {
-      list.append(el('div', { class: 'side-empty', text: q ? 'No chats match.' : 'Your chats will show up here.' }));
+      list.append(el('div', { class: 'side-empty', text: q ? 'No chats match.' : 'No chats yet. Start one, or drop files anywhere to begin.' }));
       return;
     }
     const day = 86400000;
@@ -317,19 +382,65 @@
     for (const chat of chats) {
       const g = groupOf(chat.updatedAt);
       if (g !== group) { group = g; list.append(el('div', { class: 'chat-group', text: g })); }
-      list.append(
-        el('div', { class: 'chat-item' + (chat.id === state.activeId ? ' on' : '') },
-          el('button', { type: 'button', class: 'chat-open', title: chat.title, onclick: () => openChat(chat.id) },
-            state.runChatId === chat.id ? el('span', { class: 'dot', 'aria-label': 'working' }) : null,
-            chat.title),
-          el('button', { type: 'button', class: 'chat-del', 'aria-label': 'Delete ' + chat.title, title: 'Delete chat', onclick: () => deleteChat(chat.id) },
-            el('span', { 'aria-hidden': 'true', text: '×' }))
-        )
-      );
+      const item = el('div', { class: 'chat-item' + (chat.id === state.activeId ? ' on' : '') });
+      if (state.renamingId === chat.id) {
+        const input = el('input', { class: 'chat-rename', value: chat.title, 'aria-label': 'Chat name', maxlength: '120' });
+        const finish = (keep) => {
+          if (state.renamingId !== chat.id) return;
+          state.renamingId = null;
+          const title = input.value.replace(/\s+/g, ' ').trim();
+          if (keep && title) { chat.title = title; save(true); }
+          renderAll();
+        };
+        input.addEventListener('keydown', (e) => { if (e.key === 'Enter') finish(true); if (e.key === 'Escape') finish(false); });
+        input.addEventListener('blur', () => finish(true));
+        item.append(input);
+        list.append(item);
+        requestAnimationFrame(() => { input.focus(); input.select(); });
+        continue;
+      }
+      item.append(
+        el('button', { type: 'button', class: 'chat-open', title: chat.title, onclick: () => openChat(chat.id) },
+          state.runChatId === chat.id ? el('span', { class: 'mini-spin', 'aria-label': 'working' }) : null,
+          el('span', { class: 'chat-title', text: chat.title })),
+        el('button', {
+          type: 'button', class: 'chat-more', 'aria-label': 'Options for ' + chat.title, 'aria-haspopup': 'menu',
+          'aria-expanded': String(state.menuChatId === chat.id),
+          onclick: (e) => { e.stopPropagation(); openChatMenu(chat.id, e.currentTarget); },
+        }, el('span', { 'aria-hidden': 'true', text: '⋯' })));
+      list.append(item);
     }
   }
-  function openSide() { $('#app').classList.add('side-open'); $('#scrim').hidden = false; }
-  function closeSide() { $('#app').classList.remove('side-open'); $('#scrim').hidden = true; }
+  function openChatMenu(id, button) {
+    const menu = $('#chatMenu');
+    if (state.menuChatId === id && !menu.hidden) return closeChatMenu();
+    state.menuChatId = id;
+    const r = button.getBoundingClientRect();
+    menu.hidden = false;
+    menu.style.left = Math.min(r.left, window.innerWidth - menu.offsetWidth - 8) + 'px';
+    menu.style.top = Math.min(r.bottom + 4, window.innerHeight - menu.offsetHeight - 8) + 'px';
+    renderSidebar();
+  }
+  function closeChatMenu() {
+    if (!state.menuChatId) return;
+    state.menuChatId = null;
+    $('#chatMenu').hidden = true;
+    renderSidebar();
+  }
+  const mobile = () => window.matchMedia('(max-width: 860px)').matches;
+  function openSide() {
+    if (mobile()) { $('#app').classList.add('side-open'); $('#scrim').hidden = false; return; }
+    setCollapsed(false);
+  }
+  function closeSide() {
+    $('#app').classList.remove('side-open');
+    $('#scrim').hidden = true;
+  }
+  function setCollapsed(collapsed) {
+    state.sideCollapsed = collapsed;
+    $('#app').classList.toggle('side-collapsed', collapsed);
+    try { localStorage.setItem(LS_SIDE, collapsed ? 'closed' : 'open'); } catch { /* ignore */ }
+  }
 
   // ---- thread ------------------------------------------------------------
   function nearBottom() {
@@ -366,73 +477,162 @@
     const status = el('div', { class: 'status' });
     node.append(status);
     paintStatus(status, msg);
-    const multi = msg.kind === 'files';
-    msg.results.forEach((r, i) => node.append(renderResult(chat, msg, r, i, multi)));
+    msg.results.forEach((r, i) => node.append(renderResult(chat, msg, i)));
     return node;
   }
 
+  // The line above the answers: upload and overall progress, or how the run ended.
   function paintStatus(node, msg) {
     const total = msg.results.length;
     const finished = msg.results.filter((r) => r.state === 'done' || r.state === 'failed').length;
     node.className = 'status' + (msg.status === 'working' ? '' : ' done') + (msg.status === 'stopped' ? ' stopped' : '');
     node.replaceChildren();
     let text = '';
-    if (msg.status === 'working') text = msg.note || (msg.kind === 'files' ? `Answering · ${finished} of ${total} files done` : (msg.results[0].text ? '' : 'Thinking…'));
+    if (msg.status === 'working') text = msg.note || (msg.kind === 'files' && total > 1 ? `Answering · ${finished} of ${total} files done` : '');
     else if (msg.status === 'stopped') text = msg.note || 'Stopped.';
     else if (msg.status === 'failed') text = msg.note || 'Something went wrong.';
-    else if (msg.kind === 'files') text = `${msg.results.filter((r) => r.state === 'done').length} of ${total} files answered`;
-    if (!text && msg.status !== 'working') { node.hidden = true; return; }
-    node.hidden = false;
-    node.append(el('span', { class: 'spin' }), el('span', { text: text || 'Writing…' }));
+    else if (msg.kind === 'files' && total > 1) text = `${msg.results.filter((r) => r.state === 'done').length} of ${total} files answered`;
+    node.hidden = !text;
+    if (!text) return;
+    node.append(el('span', { class: 'spin' }), el('span', { text }));
     if (msg.status === 'working' && msg.kind === 'files' && total > 1) {
       node.append(el('span', { class: 'bar-mini' }, el('i', { style: `width:${Math.max(3, (finished / total) * 100)}%` })));
     }
   }
 
-  function renderResult(chat, msg, r, i, multi) {
+  // What the model is doing or did: a one-line summary that opens into every step.
+  function renderTrace(chat, msg, i) {
+    const r = msg.results[i];
+    const working = r.state === 'working';
+    const steps = r.trace || [];
+    if (!working && !steps.length) return null;
+    const key = `${msg.id}:${i}`;
+    const open = state.openTraces.has(key);
+    const searches = steps.filter((s) => s.k === 'search').length;
+    const sites = new Set(steps.flatMap((s) => s.urls || (s.url ? [s.url] : [])).map(host)).size;
+    const secs = Math.max(0, Math.round(((r.t1 || Date.now()) - (r.t0 || Date.now())) / 1000));
+    const label = working
+      ? r.phase || 'Thinking'
+      : searches ? `Searched the web ${searches} time${searches === 1 ? '' : 's'} · ${sites} site${sites === 1 ? '' : 's'}` : 'Thought it through';
+    const head = el('button', {
+      type: 'button', class: 'trace-head', 'aria-expanded': String(open),
+      onclick: () => { if (open) state.openTraces.delete(key); else state.openTraces.add(key); paintResult(chat, msg, i); },
+    },
+      el('span', { class: 't-icon' }, working ? el('span', { class: 'spin' }) : el('svg', {}, '')),
+      el('span', { class: 'label', text: label }),
+      el('span', { class: 'time', 'data-t0': working ? String(r.t0 || Date.now()) : null, text: fmtDur(secs) }),
+      el('span', { class: 'chev', 'aria-hidden': 'true', text: '›' }));
+    if (!working) head.querySelector('.t-icon').replaceChildren(svgIcon('M5 12.5l4.5 4.5L19 7.5'));
+    const box = el('div', { class: 'trace' + (working ? ' working' : '') + (working && r.retrying ? ' retrying' : '') }, head);
+    if (open) {
+      box.append(el('ol', { class: 'trace-steps' }, steps.map((s) => {
+        if (s.k === 'search') {
+          return el('li', { class: 'step search' },
+            el('div', {}, 'Searched ', el('span', { class: 'q', text: `“${s.q[0]}”` })),
+            s.q.length > 1 ? el('div', { class: 'q-more', text: s.q.slice(1).map((q) => `“${q}”`).join(' · ') }) : null,
+            s.urls && s.urls.length ? el('div', { class: 'sites' }, s.urls.filter((u, n, all) => all.findIndex((v) => host(v) === host(u)) === n).map((u) => el('a', { class: 'site', href: u, target: '_blank', rel: 'noopener noreferrer', title: u }, face(host(u)), el('span', { text: host(u) })))) : null);
+        }
+        if (s.k === 'open') return el('li', { class: 'step' }, 'Read ', el('a', { class: 'site', href: s.url, target: '_blank', rel: 'noopener noreferrer', title: s.url }, face(host(s.url)), el('span', { text: host(s.url) })));
+        if (s.k === 'find') return el('li', { class: 'step' }, `Looked for “${s.pattern}” on `, el('span', { class: 'q', text: host(s.url) }));
+        if (s.k === 'part') return el('li', { class: 'step part', text: `Part ${s.n}` });
+        return el('li', { class: 'step', text: 'Thinking' });
+      })));
+      if (working) box.querySelector('.trace-steps').append(el('li', { class: 'step', text: r.phase || 'Thinking…' }));
+    }
+    return box;
+  }
+  function svgIcon(d) {
+    const ns = 'http://www.w3.org/2000/svg';
+    const svg = document.createElementNS(ns, 'svg');
+    svg.setAttribute('viewBox', '0 0 24 24'); svg.setAttribute('width', '15'); svg.setAttribute('height', '15');
+    svg.setAttribute('fill', 'none'); svg.setAttribute('stroke', 'currentColor'); svg.setAttribute('stroke-width', '2.4');
+    svg.setAttribute('stroke-linecap', 'round'); svg.setAttribute('stroke-linejoin', 'round');
+    const path = document.createElementNS(ns, 'path');
+    path.setAttribute('d', d);
+    svg.append(path);
+    return svg;
+  }
+
+  function renderSources(chat, msg, i) {
+    const list = (msg.results[i].sources || []).filter((s) => /^https?:\/\//i.test(s.uri));
+    if (!list.length) return [null, null];
+    const key = `${msg.id}:${i}`;
+    const open = state.openSources.has(key);
+    const button = el('button', {
+      type: 'button', class: 'sources-btn', 'aria-expanded': String(open),
+      onclick: () => { if (open) state.openSources.delete(key); else state.openSources.add(key); paintResult(chat, msg, i); },
+    }, el('span', { class: 'faces' }, [...new Set(list.map((s) => host(s.uri)))].slice(0, 4).map(face)), `Sources · ${list.length}`);
+    const panel = open
+      ? el('ul', { class: 'sources-list' }, list.map((s) => el('li', {}, el('a', { href: s.uri, target: '_blank', rel: 'noopener noreferrer', title: s.uri },
+        face(host(s.uri)), el('span', { class: 's-text' }, el('span', { class: 's-title', text: s.title || host(s.uri) }), el('span', { class: 's-host', text: host(s.uri) }))))))
+      : null;
+    return [button, panel];
+  }
+
+  function renderResult(chat, msg, i) {
+    const r = msg.results[i];
+    const multi = msg.kind === 'files';
     const body = el('div', { class: 'md' });
     const ok = !r.error;
+    const text = r.error ? r.error : tidy(r.text);
+    const [sourcesBtn, sourcesPanel] = renderSources(chat, msg, i);
     const tools = el('div', { class: 'answer-tools' });
-    if (r.text || r.error) tools.append(el('button', { type: 'button', onclick: () => copyText(r.text || r.error) }, 'Copy'));
+    if (r.state !== 'working' && (r.text || r.error)) tools.append(el('button', { type: 'button', onclick: () => copyText(r.text || r.error) }, 'Copy'));
+    if (r.state !== 'working' && r.text) tools.append(el('button', { type: 'button', title: 'Download this answer as a PDF', onclick: () => downloadPdf(multi ? r.name : chat.title, [{ text: r.text, sources: r.sources }]) }, 'PDF'));
     if ((r.state === 'stopped' || r.state === 'failed') && !state.busy && canResume(msg, r)) {
       tools.append(el('button', { type: 'button', onclick: () => resume(chat.id, msg.id, i) }, r.text ? 'Continue' : 'Retry'));
     }
-    const extras = [
+    if (sourcesBtn && r.state !== 'working') tools.append(sourcesBtn);
+    const parts = [
+      renderTrace(chat, msg, i),
+      text ? body : null,
       r.warning ? el('p', { class: 'warn', text: r.warning }) : null,
-      (r.sources || []).length
-        ? el('div', { class: 'srcs' }, r.sources.filter((s) => /^https?:\/\//i.test(s.uri)).slice(0, 12).map((s) => el('a', { href: s.uri, target: '_blank', rel: 'noopener noreferrer', title: s.title, text: s.title })))
-        : null,
       tools.childElementCount ? tools : null,
+      r.state !== 'working' ? sourcesPanel : null,
     ];
-    const text = r.error ? r.error : r.text;
     if (text) renderAnswer(body, text);
-    if (!multi) return el('div', { class: 'answer' + (ok ? '' : ' bad') }, body, extras);
+    const key = `${msg.id}:${i}`;
+    if (!multi) return el('div', { class: 'answer' + (ok ? '' : ' bad'), 'data-key': key }, parts);
 
     const label = { wait: 'Queued', working: 'Working', done: 'Done', failed: 'Failed', stopped: 'Stopped' }[r.state] || '';
     const tagClass = r.state === 'done' ? 'tag' : r.state === 'failed' ? 'tag bad' : 'tag wait';
     const open = msg.results.length <= 6 || r.state === 'working';
-    return el('details', { class: 'answer multi' + (ok ? '' : ' bad'), open: open ? '' : null },
+    return el('details', { class: 'answer multi' + (ok ? '' : ' bad'), 'data-key': key, open: open ? '' : null },
       el('summary', { class: 'answer-head' }, el('span', { class: 'name', title: r.name, text: r.name }), el('span', { class: tagClass, text: label })),
-      text ? body : el('p', { class: 'warn', text: r.state === 'working' ? 'Working on it…' : r.state === 'wait' ? 'Waiting for its turn.' : '' }),
-      extras);
+      r.state === 'wait' ? el('p', { class: 'warn', text: 'Waiting for its turn.' }) : null,
+      parts);
   }
 
-  // Re-draws one bot message in place, if its chat is on screen.
-  function paint(chat, msg, { status = false } = {}) {
+  // Re-draws one answer in place (and the progress line above it), if its chat is on screen.
+  function paintResult(chat, msg, i) {
     save();
     if (chat.id !== state.activeId) { renderSidebar(); return; }
     const node = document.querySelector(`.msg[data-id="${msg.id}"]`);
     if (!node) return renderAll();
     const keep = nearBottom();
-    if (status) paintStatus(node.querySelector('.status'), msg);
-    else {
-      const openState = [...node.querySelectorAll('details.answer')].map((d) => d.open);
-      const fresh = renderMsg(chat, msg);
-      [...fresh.querySelectorAll('details.answer')].forEach((d, i) => { if (openState[i] !== undefined && msg.results[i].state !== 'working') d.open = openState[i]; });
-      node.replaceWith(fresh);
+    paintStatus(node.querySelector('.status'), msg);
+    const old = node.querySelector(`[data-key="${msg.id}:${i}"]`);
+    const fresh = renderResult(chat, msg, i);
+    if (old) {
+      if (old.tagName === 'DETAILS' && msg.results[i].state !== 'working') fresh.open = old.open;
+      old.replaceWith(fresh);
     }
     $('#exportMenuWrap').hidden = !chatRows(chat).length;
     if (keep) scrollToEnd(true);
+  }
+  // Streaming text arrives many times a second; draw at most every 120 ms per answer.
+  const paintTimers = new Map();
+  function paintSoon(chat, msg, i) {
+    const key = `${msg.id}:${i}`;
+    if (paintTimers.has(key)) return;
+    paintTimers.set(key, setTimeout(() => { paintTimers.delete(key); paintResult(chat, msg, i); }, 120));
+  }
+  function paint(chat, msg) {
+    save();
+    if (chat.id !== state.activeId) { renderSidebar(); return; }
+    const node = document.querySelector(`.msg[data-id="${msg.id}"]`);
+    if (!node) return renderAll();
+    paintStatus(node.querySelector('.status'), msg);
   }
 
   async function renderAnswer(container, text) {
@@ -451,6 +651,8 @@
       const html = marked.parse(tokenized, { gfm: true, breaks: false });
       container.innerHTML = DOMPurify.sanitize(html);
       container.classList.remove('plain');
+      // Email addresses would all become underlined mailto links; keep them as plain text.
+      for (const a of container.querySelectorAll('a[href^="mailto:"]')) a.replaceWith(document.createTextNode(a.textContent));
       for (const a of container.querySelectorAll('a[href]')) { a.target = '_blank'; a.rel = 'noopener noreferrer'; }
       if (mathBlocks.length) {
         const walker = container.ownerDocument.createTreeWalker(container, NodeFilter.SHOW_TEXT);
@@ -600,7 +802,7 @@
       msg.status = msg.results.some((r) => r.state === 'stopped') ? 'stopped' : 'done';
       msg.note = msg.status === 'stopped' ? stoppedNote : '';
     }
-    for (const r of msg.results) if (r.state === 'working' || r.state === 'wait') r.state = 'stopped';
+    for (const r of msg.results) if (r.state === 'working' || r.state === 'wait') { r.state = 'stopped'; r.t1 = r.t1 || Date.now(); r.phase = ''; }
     state.busy = false;
     state.runChatId = null;
     state.abort = null;
@@ -648,20 +850,46 @@
     }
   }
 
-  // Gets one result's answer, writing progress into the message as it goes.
+  // Gets one result's answer, writing progress into it as it goes.
   async function answerOne(chat, msg, i, payload) {
     const r = msg.results[i];
     r.state = 'working';
+    r.phase = 'Thinking';
+    r.retrying = false;
+    r.t0 = Date.now();
+    delete r.t1;
     delete r.error;
-    paint(chat, msg);
+    r.trace = r.trace || [];
+    const step = (s) => {
+      const last = r.trace[r.trace.length - 1];
+      if (s.k === 'think' && last && last.k === 'think') return;
+      r.trace.push(s);
+      if (r.trace.length > MAX_TRACE) r.trace.splice(0, r.trace.length - MAX_TRACE);
+    };
+    paintResult(chat, msg, i);
     try {
       const out = await ask(payload, {
         prior: r.text || '',
-        note: (n) => { msg.note = msg.kind === 'files' ? `${r.name}: ${n}` : n; paint(chat, msg, { status: true }); },
-        onText: (text, sources) => { r.text = text; r.sources = sources; msg.note = ''; paint(chat, msg); },
+        note: (n) => { r.phase = n; r.retrying = true; paintSoon(chat, msg, i); },
+        onEvent: (ev) => {
+          r.retrying = false;
+          if (ev.type === 'think') { step({ k: 'think' }); r.phase = 'Thinking'; }
+          else if (ev.type === 'searching') r.phase = 'Searching the web';
+          else if (ev.type === 'search') { step({ k: 'search', q: ev.queries, urls: (ev.urls || []).slice(0, 5) }); r.phase = `Searching “${ev.queries[0]}”`; }
+          else if (ev.type === 'open') { step({ k: 'open', url: ev.url }); r.phase = `Reading ${host(ev.url)}`; }
+          else if (ev.type === 'find') { step({ k: 'find', url: ev.url, pattern: ev.pattern }); r.phase = `Looking through ${host(ev.url)}`; }
+          else if (ev.type === 'part') { step({ k: 'part', n: ev.n }); r.phase = `Continuing · part ${ev.n}`; }
+          paintSoon(chat, msg, i);
+        },
+        onText: (text, sources, live) => {
+          r.retrying = false;
+          r.text = text;
+          if (!live) r.sources = sources;
+          else r.phase = 'Writing';
+          paintSoon(chat, msg, i);
+        },
       });
       Object.assign(r, { state: 'done', text: out.text, warning: out.warning, sources: out.sources });
-      msg.note = '';
     } catch (e) {
       if (e === STOPPED) { r.state = 'stopped'; throw e; }
       if (e.status === 401) throw e;
@@ -670,7 +898,11 @@
       else r.warning = `Stopped before the end: ${e.message}`;
       if (msg.kind !== 'files') throw e;
     } finally {
-      paint(chat, msg);
+      r.t1 = Date.now();
+      r.phase = '';
+      clearTimeout(paintTimers.get(`${msg.id}:${i}`));
+      paintTimers.delete(`${msg.id}:${i}`);
+      paintResult(chat, msg, i);
     }
   }
 
@@ -696,10 +928,11 @@
       }
       uploaded++;
       msg.note = `Reading and uploading files · ${uploaded} of ${files.length}`;
-      paint(chat, msg, { status: true });
+      paint(chat, msg);
     });
     if (state.cancelRequested) throw STOPPED;
     msg.note = '';
+    msg.results.forEach((r, i) => { if (r.state === 'failed') paintResult(chat, msg, i); });
     paint(chat, msg);
     const todo = msg.results.map((r, i) => i).filter((i) => msg.results[i].parts);
     if (!todo.length) throw new Error('None of the files could be read.');
@@ -750,7 +983,7 @@
     if (!chat) return;
     const rows = chatRows(chat);
     if (!rows.length) return toast('Nothing to download yet.');
-    if (fmt === 'pdf') return window.print();
+    if (fmt === 'pdf') return downloadPdf(chat.title, chatForPdf(chat));
     const stamp = new Date().toISOString().slice(0, 10);
     const sources = (r) => (r.sources || []).map((s) => s.uri).join(' ');
     const status = (r) => (r.error ? 'failed' : r.state === 'done' ? 'done' : 'unfinished');
@@ -767,6 +1000,82 @@
       download(`docbatch-${stamp}.txt`, rows.map((r) => (rows.length > 1 ? `=== ${r.name} ===\n` : '') + (r.error ? 'FAILED: ' + r.error : r.text) + '\n').join('\n'), 'text/plain');
     }
   }
+  // The whole conversation for a PDF: your messages, then each answer under its file name.
+  function chatForPdf(chat) {
+    const out = [];
+    for (const msg of chat.messages) {
+      if (msg.role === 'user') {
+        const files = msg.files && msg.files.length ? `\n[Attached: ${msg.files.map((f) => f.name).join(', ')}]` : '';
+        out.push({ you: true, text: msg.text + files });
+      } else {
+        for (const r of msg.results) if (r.text || r.error) out.push({ name: msg.kind === 'files' ? r.name : '', text: r.error ? `Failed: ${r.error}` : r.text, sources: r.sources });
+      }
+    }
+    return out;
+  }
+  // Markdown to readable plain text for the PDF.
+  const mdToText = (t) => String(t || '')
+    .replace(/```[\w-]*\n?/g, '')
+    .replace(/^#{1,6}\s+/gm, '')
+    .replace(/\*\*(.+?)\*\*/g, '$1').replace(/__(.+?)__/g, '$1')
+    .replace(/(^|[^*\w])\*(?!\s)([^*\n]+?)\*/g, '$1$2')
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '$1 ($2)')
+    .replace(/^(\s*)[-*+]\s+/gm, '$1• ');
+
+  // Builds a real PDF file in the browser and downloads it.
+  async function downloadPdf(title, blocks) {
+    try {
+      await loadScript('pdf');
+    } catch (e) {
+      return toast(e.message);
+    }
+    const doc = new window.jspdf.jsPDF({ unit: 'pt', format: 'a4' });
+    const W = doc.internal.pageSize.getWidth();
+    const H = doc.internal.pageSize.getHeight();
+    const M = 54;
+    let y = M;
+    const write = (text, { size = 10.5, bold = false, color = [29, 28, 25], after = 0, indent = 0 } = {}) => {
+      doc.setFont('helvetica', bold ? 'bold' : 'normal');
+      doc.setFontSize(size);
+      doc.setTextColor(...color);
+      for (const line of doc.splitTextToSize(text || ' ', W - 2 * M - indent)) {
+        if (y + size > H - M) { doc.addPage(); y = M; }
+        doc.text(line, M + indent, y + size);
+        y += size * 1.4;
+      }
+      y += after;
+    };
+    write(title, { size: 17, bold: true, after: 2 });
+    write(`DocBatch · ${new Date().toLocaleString()}`, { size: 8.5, color: [138, 134, 123], after: 16 });
+    for (const b of blocks) {
+      if (b.you) {
+        write('You', { size: 9, bold: true, color: [31, 95, 58], after: 1 });
+        write(b.text, { color: [87, 84, 76], after: 12 });
+        continue;
+      }
+      if (b.name) write(b.name, { size: 12, bold: true, after: 4 });
+      for (const para of mdToText(b.text).split('\n')) write(para, { after: para.trim() ? 0 : -6 });
+      const sources = (b.sources || []).filter((s) => /^https?:\/\//i.test(s.uri));
+      if (sources.length) {
+        y += 6;
+        write('Sources', { size: 8.5, bold: true, color: [138, 134, 123], after: 1 });
+        for (const s of sources) write(`${s.title || host(s.uri)} — ${s.uri}`, { size: 8, color: [138, 134, 123] });
+      }
+      y += 16;
+    }
+    const pages = doc.getNumberOfPages();
+    for (let p = 1; p <= pages; p++) {
+      doc.setPage(p);
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(8);
+      doc.setTextColor(138, 134, 123);
+      doc.text(`${p} / ${pages}`, W - M, H - 28, { align: 'right' });
+    }
+    const safe = String(title || 'docbatch').replace(/[^\w\s-]+/g, '').trim().replace(/\s+/g, '-').slice(0, 60) || 'docbatch';
+    doc.save(`${safe}.pdf`);
+  }
+
   function download(name, text, type) {
     const url = URL.createObjectURL(new Blob([text], { type }));
     const a = el('a', { href: url, download: name });
@@ -781,6 +1090,7 @@
     try {
       const c = await api('config');
       state.config = c;
+      if (c.model) $('#modelName').textContent = c.model;
       if (!c.hasKey) toast('The server is not configured to answer yet. Ask the site owner.');
       if (c.passwordRequired && !c.authorized) $('#pwRow').hidden = false;
     } catch (e) {
@@ -835,13 +1145,29 @@
     });
 
     $('#newChat').addEventListener('click', newChat);
+    $('#barNewChat').addEventListener('click', newChat);
     $('#chatSearch').addEventListener('input', renderSidebar);
     $('#openSide').addEventListener('click', openSide);
-    $('#closeSide').addEventListener('click', closeSide);
+    $('#collapseSide').addEventListener('click', () => (mobile() ? closeSide() : setCollapsed(true)));
     $('#scrim').addEventListener('click', closeSide);
+    $('#chatMenu').addEventListener('click', (e) => {
+      const b = e.target.closest('button[data-act]');
+      const id = state.menuChatId;
+      if (!b || !id) return;
+      e.stopPropagation();
+      closeChatMenu();
+      if (b.dataset.act === 'rename') { state.renamingId = id; renderSidebar(); } else deleteChat(id);
+    });
+    document.addEventListener('click', (e) => { if (!e.target.closest('#chatMenu')) closeChatMenu(); });
+    $('#chatList').addEventListener('scroll', closeChatMenu);
+    // Keeps the elapsed time on working answers ticking between events.
+    setInterval(() => {
+      for (const n of document.querySelectorAll('.time[data-t0]')) n.textContent = fmtDur(Math.round((Date.now() - Number(n.dataset.t0)) / 1000));
+    }, 1000);
+    $('#app').classList.toggle('side-collapsed', state.sideCollapsed);
     document.addEventListener('keydown', (e) => {
       if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'o') { e.preventDefault(); newChat(); }
-      if (e.key === 'Escape') { closeSide(); attachMenu.hidden = true; exportMenu.hidden = true; }
+      if (e.key === 'Escape') { closeSide(); closeChatMenu(); attachMenu.hidden = true; exportMenu.hidden = true; }
     });
     window.addEventListener('beforeunload', (e) => { save(true); if (state.busy) e.preventDefault(); });
 
