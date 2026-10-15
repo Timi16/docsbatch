@@ -195,8 +195,8 @@ async function openaiStream(json, { softMs, hardMs, onProgress = () => {} }) {
   return { response, text, timedOut: timedOut && !response };
 }
 
-// Web search runs only through Tavily (free plan: 1,000 searches a month). OpenAI's built-in search is
-// never used: it is billed per search and cost far more. The model calls this as a function tool.
+// Web search runs only through your own SearXNG server (SEARXNG_URL), which is free. No paid search
+// service is used: not OpenAI's built-in search, not Tavily. The model calls this as a function tool.
 const SEARCH_TOOL = {
   type: 'function',
   name: 'web_search',
@@ -204,31 +204,34 @@ const SEARCH_TOOL = {
   parameters: { type: 'object', properties: { query: { type: 'string', description: 'The search query' } }, required: ['query'], additionalProperties: false },
   strict: true,
 };
-const useTavily = () => !!process.env.TAVILY_API_KEY;
+const searxngUrl = () => String(process.env.SEARXNG_URL || '').trim().replace(/\/+$/, '');
+const searchConfigured = () => !!searxngUrl();
+const trimResult = (x) => ({
+  title: String(x.title || '').slice(0, 150),
+  url: String(x.url || ''),
+  content: String(x.content || '').replace(/\s+/g, ' ').slice(0, 500),
+});
 
-// One basic search (1 Tavily credit), trimmed to what the model needs so it costs few tokens.
-async function tavilySearch(query) {
-  const r = await fetch('https://api.tavily.com/search', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.TAVILY_API_KEY}` },
-    body: JSON.stringify({ query: String(query).slice(0, 300), search_depth: 'basic', max_results: 5 }),
+// One query to your SearXNG server. The X-Search-Key header is what your reverse proxy checks.
+async function searxngSearch(query) {
+  const params = new URLSearchParams({ q: String(query).slice(0, 300), format: 'json', language: 'en', safesearch: '0' });
+  const r = await fetch(`${searxngUrl()}/search?${params}`, {
+    headers: { Accept: 'application/json', 'X-Search-Key': process.env.SEARXNG_KEY || '' },
+    signal: AbortSignal.timeout(15000),
   });
-  let data = {};
-  try { data = await r.json(); } catch { /* use the status */ }
-  // Out of credits will not fix itself; a bad key must not look like a wrong app password (401).
-  if (r.status === 432 || r.status === 433) throw httpError(402, 'The monthly web searches (Tavily) are used up. They reset next month, or add credit at tavily.com.');
-  if (r.status === 401 || r.status === 403) throw httpError(403, 'The web search key is not valid. Ask the site owner.');
-  if (!r.ok) {
-    const detail = data.detail && (data.detail.error || data.detail);
-    return { error: typeof detail === 'string' ? detail : `Search failed (${r.status})` };
+  if (!r.ok) return { error: `Search server answered ${r.status}` };
+  const data = await r.json();
+  return { results: (data.results || []).filter((x) => /^https?:\/\//.test(x.url || '')).slice(0, 5).map(trimResult) };
+}
+
+// Web search goes only to your SearXNG server. A failed or empty search goes back to the model as such
+// (it then marks the item unverified); nothing else is ever asked, so search never costs credits.
+async function webSearch(query) {
+  try {
+    return { ...(await searxngSearch(query)), via: 'searxng' };
+  } catch (e) {
+    return { error: `Search server unreachable: ${e.message}`, via: 'searxng' };
   }
-  return {
-    results: (data.results || []).slice(0, 5).map((x) => ({
-      title: String(x.title || '').slice(0, 150),
-      url: String(x.url || ''),
-      content: String(x.content || '').replace(/\s+/g, ' ').slice(0, 500),
-    })),
-  };
 }
 
 function cleanTask(task) {
@@ -305,6 +308,6 @@ function normalize(r) {
 
 module.exports = {
   BASE, MAX_UPLOAD_CHUNK_BYTES, MAX_FILE_BYTES, FILE_TTL_SECONDS, SYSTEM, SEARCH_NOTE, FINISH, MORE, ITEMS_PER_TURN,
-  httpError, allowedModels, apiKey, checkAuth, route, streamRoute, openai, openaiStream, SEARCH_TOOL, useTavily, tavilySearch,
+  httpError, allowedModels, apiKey, checkAuth, route, streamRoute, openai, openaiStream, SEARCH_TOOL, searchConfigured, webSearch,
   cleanTask, cleanModel, cleanItem, buildRequest, normalize,
 };

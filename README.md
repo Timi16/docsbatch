@@ -14,14 +14,15 @@ browser, so nobody sees anyone else's chats. Set `APP_PASSWORD` so only people y
 3. **Settings > Environment Variables**, add:
    - `OPENAI_API_KEY` (required): from https://platform.openai.com/api-keys
    - `APP_PASSWORD` (strongly recommended): without it, anyone with the link can spend your credit
-   - `TAVILY_API_KEY` (needed for web search): from https://tavily.com; the free plan covers 1,000 searches a month
+   - `SEARXNG_URL` and `SEARXNG_KEY` (web search, free): your own SearXNG server; see `searxng/README.md`
    - `OPENAI_MODELS` (optional): comma-separated list of allowed models; `gpt-6-luna` is used by default when allowed
 4. Redeploy so the variables take effect.
 
 The functions may run for up to 300 seconds (`vercel.json`), which needs Fluid Compute (on by default for new
 Vercel projects).
 
-Local test: `npx vercel dev` with a `.env.local` copied from `.env.example`.
+Local test: put your keys in `.env` (or `.env.local`), run `npm run dev`, and open http://localhost:3000. To use a
+local SearXNG, start it with Docker (see `searxng/README.md`) and set `SEARXNG_URL=http://127.0.0.1:8080` in `.env.local`.
 
 ## Using it
 
@@ -31,8 +32,9 @@ Local test: `npx vercel dev` with a `.env.local` copied from `.env.example`.
   folders anywhere on the page. With files attached, your message is the instruction for each file.
 - **Follow-ups:** the model sees the earlier messages and answers in the chat, so "now make that a table" works.
   It does not see files attached to earlier messages, only the answers about them.
-- **Web search:** the toggle in the chat box. On by default. Searches run only through Tavily; OpenAI's own web
-  search (billed per search) is never used. Without `TAVILY_API_KEY`, searching is refused with a message.
+- **Web search:** the toggle in the chat box. On by default. Searches go only to your own SearXNG server, so they
+  are free; no paid search service (OpenAI search, Tavily) is used. If SearXNG finds nothing for a lead, the model
+  marks it unverified (e.g. REVIEW). Without `SEARXNG_URL`, searching is refused with a message.
 - **Live progress:** answers stream in as they are written. Above each answer a line shows what the model is doing
   (Thinking, Searching the web, Writing). Click it to see every search it ran and the sites it found; when it is
   done it sums up, e.g. "Searched the web 8 times · 25 sites · 50s". Sources sit behind a **Sources** button.
@@ -64,8 +66,8 @@ Each request only references the uploaded files, so it stays small however big t
 
 An answer that does not fit in one request is continued automatically:
 
-- Web searches are function calls the server answers with Tavily results (5 short snippets each), so the model
-  only pays for the text it reads.
+- Web searches are function calls the server answers with SearXNG results, 5 short snippets each, at
+  most two at a time, so the model only pays for the text it reads.
 - For research on many items, such as a list of leads, the model does 8 items per turn and ends the turn with
   `[[CONTINUE]]`. The page then sends back the answer so far and asks for the next items, up to 100 turns per file.
 - The same happens when the model hits its output limit or the function gets close to its time limit. If a research
@@ -100,9 +102,8 @@ password-protected files.
   **Continue**.
 - Chats live in the browser's local storage. Clearing site data deletes them, and they do not sync between devices.
   When storage is full, the oldest chats are dropped first.
-- **Cost:** with `gpt-6-luna` the model itself is cheap: a 12-lead research test used about $0.004 of OpenAI credit and
-  23 Tavily searches. Searches are the limit: each costs 1 Tavily credit (1,000 free a month, then $0.008 each), and
-  each request is capped at 16 searches. A 200-lead list with a second REVIEW pass needs roughly 300–400.
+- **Cost:** searches are free (your SearXNG). The only cost is OpenAI: with `gpt-6-luna`, a 12-lead research test
+  used about $0.004, so a 200-lead list is roughly $0.05–0.10. Each request is capped at 16 searches.
   Set a monthly budget limit in your OpenAI settings as a safety net.
 
 ## Files

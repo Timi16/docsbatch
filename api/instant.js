@@ -1,5 +1,5 @@
 'use strict';
-const { streamRoute, openaiStream, httpError, cleanTask, cleanModel, cleanItem, buildRequest, normalize, SEARCH_NOTE, FINISH, MORE, ITEMS_PER_TURN, SEARCH_TOOL, useTavily, tavilySearch } = require('./_lib');
+const { streamRoute, openaiStream, httpError, cleanTask, cleanModel, cleanItem, buildRequest, normalize, SEARCH_NOTE, FINISH, MORE, ITEMS_PER_TURN, SEARCH_TOOL, searchConfigured, webSearch } = require('./_lib');
 
 const MESSAGE_SYSTEM = 'You are a precise, thorough assistant. Follow the user’s instructions and requested output format exactly. Preserve all requested details; do not replace a requested result with a generic summary. Use supplied information and enabled search, distinguish verified facts from uncertainty, and never invent facts or claim access to files that were not provided. If essential input is missing, say exactly what is missing and ask only for that input. Be concise only when requested or when the task calls for it. ' + FINISH;
 const CONTINUE = 'Your answer so far is above and is not finished. Continue it from the exact character where it stops. Do not repeat anything already written, do not add an introduction, a note about continuing, or any status line or count between items, and keep the same format. Carry on until the whole task is finished.';
@@ -8,7 +8,7 @@ const SLOWER = ' Your last turn ran out of time before it wrote anything. This t
 // The function is limited to 300 s (vercel.json), so stop reading before that and let the page ask for the rest.
 const SOFT_MS = 200000;
 const HARD_MS = 280000;
-// Caps on Tavily searches per request, so a confused turn cannot burn the monthly free credits.
+// Caps on searches per request, so a confused turn cannot hammer your SearXNG server.
 const MAX_SEARCHES = ITEMS_PER_TURN * 2;
 const MAX_ROUNDS = 12;
 const ENOUGH = `No more searches this turn. Write the finished results you have now, mark anything unverified as the task says, and end with ${MORE} if items remain.`;
@@ -46,6 +46,19 @@ function knownNote(known) {
   return `\n\nAlready verified in earlier research in this app (email domain — current top executive). For leads with these domains, use the listed executive directly instead of searching again, unless the task gives a specific reason to re-check one:\n${lines.join('\n')}`;
 }
 
+// Like Promise.all over items, but runs at most `limit` at once; results keep their order.
+async function mapLimit(items, limit, fn) {
+  const out = new Array(items.length);
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) {
+      const i = next++;
+      out[i] = await fn(items[i], i);
+    }
+  }));
+  return out;
+}
+
 // Models asked to continue sometimes repeat the end of the text first; drop that overlap.
 function dropOverlap(prior, next) {
   const max = Math.min(prior.length, next.length, 600);
@@ -62,7 +75,7 @@ module.exports = streamRoute(async (req, emit) => {
   const model = cleanModel(b.model);
   const useSearch = !!b.useSearch;
   const prior = typeof b.prior === 'string' ? b.prior : '';
-  if (useSearch && !useTavily()) throw httpError(400, 'Web search is not set up on this site (no Tavily key). Turn off Web search, or ask the site owner to add TAVILY_API_KEY.');
+  if (useSearch && !searchConfigured()) throw httpError(400, 'Web search is not set up on this site. Turn off Web search, or ask the site owner to add SEARXNG_URL.');
   let request;
   if (typeof b.message === 'string') {
     const message = cleanTask(b.message);
@@ -84,10 +97,10 @@ module.exports = streamRoute(async (req, emit) => {
     request.input.push({ role: 'user', content: SLOWER.trim() });
   }
 
-  // With Tavily, the model asks for searches as function calls: run them, hand back the results, and
-  // let it carry on (same response chain) until it writes its answer.
+  // The model asks for searches as function calls: run them on SearXNG, hand back the results,
+  // and let it carry on (same response chain) until it writes its answer.
   const started = Date.now();
-  const tavily = useSearch;
+  const searching = useSearch;
   const found = [];
   let searches = 0;
   const usage = { input: 0, cached: 0, output: 0 };
@@ -103,10 +116,11 @@ module.exports = streamRoute(async (req, emit) => {
       usage.cached += (response.usage.input_tokens_details || {}).cached_tokens || 0;
       usage.output += response.usage.output_tokens || 0;
     }
-    const calls = tavily && response ? (response.output || []).filter((o) => o.type === 'function_call' && o.name === 'web_search') : [];
+    const calls = searching && response ? (response.output || []).filter((o) => o.type === 'function_call' && o.name === 'web_search') : [];
     if (!calls.length) break;
     const outOfBudget = round >= MAX_ROUNDS - 1 || Date.now() - started > SOFT_MS;
-    const outputs = await Promise.all(calls.map(async (call) => {
+    // At most two searches at a time: bursts are what get a search server blocked by the engines behind it.
+    const outputs = await mapLimit(calls, 2, async (call) => {
       let query = '';
       try { query = String(JSON.parse(call.arguments || '{}').query || '').trim(); } catch { /* empty query */ }
       let result;
@@ -115,18 +129,18 @@ module.exports = streamRoute(async (req, emit) => {
       else {
         searches++;
         emit({ type: 'searching' });
-        result = await tavilySearch(query);
+        result = await webSearch(query);
         const urls = (result.results || []).map((x) => x.url).filter((u) => /^https?:\/\//.test(u));
-        emit({ type: 'search', queries: [query.slice(0, 200)], urls: urls.slice(0, 5) });
+        emit({ type: 'search', queries: [query.slice(0, 200)], urls: urls.slice(0, 5), via: result.via });
         if (urls[0] && !found.some((s) => s.uri === urls[0])) found.push({ title: result.results[0].title || urls[0], uri: urls[0] });
       }
       return { type: 'function_call_output', call_id: call.call_id, output: JSON.stringify(result) };
-    }));
+    });
     body = { model, previous_response_id: response.id, instructions: request.instructions, tools: request.tools, input: outputs };
   }
   const out = response ? normalize(response) : { text: streamed, sources: [], cut: false };
-  if (tavily && !out.sources.length) out.sources = found.slice(0, 8);
-  out.usage = { ...usage, searches: tavily ? searches : null }; // what this request cost: tokens and Tavily searches
+  if (searching && !out.sources.length) out.sources = found.slice(0, 8);
+  out.usage = { ...usage, searches: searching ? searches : null }; // what this request used: tokens and (free) searches
   if (prior.trim()) out.text = dropOverlap(prior, out.text);
   const cut = out.cut;
   delete out.cut;

@@ -1,0 +1,11 @@
+# Caddy in front of SearXNG: HTTPS is automatic. Only requests carrying the right X-Search-Key header get through,
+# so strangers cannot use your search server. Start Caddy with SEARCH_KEY set to the same value as SEARXNG_KEY
+# in Vercel, e.g.  SEARCH_KEY=... caddy run --config Caddyfile
+search.example.com {
+	@nokey not header X-Search-Key {$SEARCH_KEY}
+	respond @nokey "Forbidden" 403
+
+	reverse_proxy 127.0.0.1:8080 {
+		header_up X-Real-IP {remote_host}
+	}
+}

@@ -977,7 +977,7 @@
           r.retrying = false;
           if (ev.type === 'think') { step({ k: 'think' }); r.phase = 'Thinking'; }
           else if (ev.type === 'searching') r.phase = 'Searching the web';
-          else if (ev.type === 'search') { step({ k: 'search', q: ev.queries, urls: (ev.urls || []).slice(0, 5) }); r.phase = `Searching “${ev.queries[0]}”`; }
+          else if (ev.type === 'search') { step({ k: 'search', q: ev.queries, urls: (ev.urls || []).slice(0, 5)}); r.phase = `Searching “${ev.queries[0]}”`; }
           else if (ev.type === 'open') { step({ k: 'open', url: ev.url }); r.phase = `Reading ${host(ev.url)}`; }
           else if (ev.type === 'find') { step({ k: 'find', url: ev.url, pattern: ev.pattern }); r.phase = `Looking through ${host(ev.url)}`; }
           else if (ev.type === 'part') { step({ k: 'part', n: ev.n }); r.phase = `Continuing · part ${ev.n}`; }

@@ -1,0 +1,26 @@
+# SearXNG for DocBatch: a private search server the app queries for web search.
+# Run on your server with:  docker compose up -d   (after creating .env from .env.example)
+# It only listens on 127.0.0.1:8080; put your reverse proxy (Caddy or nginx, see the examples) in front of it.
+services:
+  searxng:
+    image: docker.io/searxng/searxng:latest
+    container_name: searxng
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - ./config:/etc/searxng:rw
+    environment:
+      - SEARXNG_BASE_URL=https://${SEARXNG_HOSTNAME:-search.example.com}/
+      - SEARXNG_SECRET=${SEARXNG_SECRET:?Set SEARXNG_SECRET in .env (openssl rand -hex 32)}
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+    logging:
+      driver: json-file
+      options:
+        max-size: "1m"
+        max-file: "3"
