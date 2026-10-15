@@ -182,6 +182,16 @@ button { cursor: pointer; }
 .rec-stats { display: flex; align-items: baseline; gap: 2px; color: var(--ink2); font-size: 14px; }
 .rec-stats b { font: 400 26px/1 var(--serif); color: var(--ink); margin-right: 4px; }
 .rec-live { margin-left: 10px; font-size: 12.5px; color: var(--accent); animation: pulse 1.4s ease-in-out infinite; }
+.rec-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.rec-copy { border: 1px solid var(--line); background: var(--panel); border-radius: 9px; padding: 5px 10px; font-size: 12.5px; color: var(--ink2); cursor: pointer; }
+.rec-copy:hover { border-color: var(--accent); color: var(--ink); }
+.rec-table td.copyable { cursor: copy; }
+.rec-table td.copyable:hover { color: var(--accent); }
+.rec-table .c-copy { width: 40px; }
+.row-copy { border: 0; background: none; color: var(--muted); width: 26px; height: 26px; border-radius: 7px; display: grid; place-items: center; opacity: 0; cursor: pointer; }
+.rec-table tr:hover .row-copy, .row-copy:focus-visible { opacity: 1; }
+.row-copy:hover { background: var(--hover); color: var(--ink); }
+.step.known::before { border-color: var(--accent); background: var(--accent-soft); }
 .rec-tabs { display: inline-flex; gap: 2px; background: var(--side); border: 1px solid var(--line); border-radius: 10px; padding: 3px; }
 .rec-tab { display: inline-flex; align-items: center; gap: 6px; border: 0; background: none; border-radius: 7px; padding: 4px 10px; font-size: 13px; color: var(--ink2); cursor: pointer; }
 .rec-tab span { font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
@@ -220,6 +230,9 @@ button { cursor: pointer; }
   .rec-table .c-n { width: 40px; }
   .rec-table .c-name { width: 46%; }
   .rec-table .c-exec { width: auto; }
+  .rec-table .c-copy { width: 34px; }
+  .row-copy { opacity: 1; }
+  .rec-copy { padding: 5px 8px; }
   .rec-table .exec { white-space: normal; }
   .rec-table .name .dom { display: block; font-weight: 400; font-size: 11.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; }
   .rec-table td, .rec-table th { padding: 8px 9px; }

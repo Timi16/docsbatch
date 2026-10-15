@@ -510,11 +510,12 @@
     const key = `${msg.id}:${i}`;
     const open = state.openTraces.has(key);
     const searches = steps.filter((s) => s.k === 'search').length;
+    const reused = (steps.find((s) => s.k === 'known') || {}).n || 0;
     const sites = new Set(steps.flatMap((s) => s.urls || (s.url ? [s.url] : [])).map(host)).size;
     const secs = Math.max(0, Math.round(((r.t1 || Date.now()) - (r.t0 || Date.now())) / 1000));
     const label = working
       ? r.phase || 'Thinking'
-      : searches ? `Searched the web ${searches} time${searches === 1 ? '' : 's'} · ${sites} site${sites === 1 ? '' : 's'}` : 'Thought it through';
+      : (searches ? `Searched the web ${searches} time${searches === 1 ? '' : 's'} · ${sites} site${sites === 1 ? '' : 's'}` : 'Thought it through') + (reused ? ` · reused ${reused} from earlier` : '');
     const head = el('button', {
       type: 'button', class: 'trace-head', 'aria-expanded': String(open),
       onclick: () => { if (open) state.openTraces.delete(key); else state.openTraces.add(key); paintResult(chat, msg, i); },
@@ -536,6 +537,7 @@
         if (s.k === 'open') return el('li', { class: 'step' }, 'Read ', el('a', { class: 'site', href: s.url, target: '_blank', rel: 'noopener noreferrer', title: s.url }, face(host(s.url)), el('span', { text: host(s.url) })));
         if (s.k === 'find') return el('li', { class: 'step' }, `Looked for “${s.pattern}” on `, el('span', { class: 'q', text: host(s.url) }));
         if (s.k === 'part') return el('li', { class: 'step part', text: `Part ${s.n}` });
+        if (s.k === 'known') return el('li', { class: 'step known', text: `Reused ${s.n} ${s.n === 1 ? 'company' : 'companies'} already found in earlier chats` });
         return el('li', { class: 'step', text: 'Thinking' });
       })));
       if (working) box.querySelector('.trace-steps').append(el('li', { class: 'step', text: r.phase || 'Thinking…' }));
@@ -611,28 +613,54 @@
     const setFilter = (f) => { state.recFilter.set(key, f); paintResult(chat, msg, i); };
     const tab = (f, label, n) => el('button', { type: 'button', class: 'rec-tab' + (filter === f ? ' on' : ''), 'aria-pressed': String(filter === f), onclick: () => setFilter(f) }, label, el('span', { text: String(n) }));
     const shown = rows.map((r, n) => ({ ...r, n: n + 1 })).filter((r) => filter === 'all' || (filter === 'rev' ? r.review : !r.review));
+    const line = (r) => `${r.name} ${r.email} ${r.review ? 'REVIEW' : r.exec}`;
+    const copyRows = () => copyText(shown.map(line).join('\n\n'));
+    const copySheets = () => copyText(['Name\tEmail\tCompany\tTop executive\tStatus', ...shown.map((r) => [r.name, r.email, r.domain, r.review ? '' : r.exec, r.review ? 'Review' : 'Verified'].join('\t'))].join('\n'));
+    const cell = (cls, value, kids) => el('td', { class: cls + ' copyable', title: `${value} · click to copy`, onclick: () => copyText(value) }, kids);
     return el('div', { class: 'records' },
       el('div', { class: 'rec-head' },
         el('div', { class: 'rec-stats' },
           el('b', { text: String(rows.length) }), el('span', { text: rows.length === 1 ? ' lead' : ' leads' }),
           working ? el('span', { class: 'rec-live', text: 'filling in…' }) : null),
-        el('div', { class: 'rec-tabs', role: 'group', 'aria-label': 'Filter rows' }, tab('all', 'All', rows.length), tab('ok', 'Verified', verified), tab('rev', 'Review', review))),
+        el('div', { class: 'rec-actions' },
+          el('div', { class: 'rec-tabs', role: 'group', 'aria-label': 'Filter rows' }, tab('all', 'All', rows.length), tab('ok', 'Verified', verified), tab('rev', 'Review', review)),
+          el('button', { type: 'button', class: 'rec-copy', title: 'Copy the rows shown, one lead per line', onclick: copyRows }, 'Copy rows'),
+          el('button', { type: 'button', class: 'rec-copy', title: 'Copy the rows shown as columns for Excel or Google Sheets', onclick: copySheets }, 'Copy for Sheets'))),
       el('div', { class: 'rec-bar', title: `${verified} verified, ${review} to review` },
         el('i', { class: 'ok', style: `width:${(verified / rows.length) * 100}%` }),
         el('i', { class: 'rev', style: `width:${(review / rows.length) * 100}%` })),
       el('div', { class: 'rec-scroll' },
         el('table', { class: 'rec-table' },
-          el('colgroup', {}, ['n', 'name', 'exec', 'co', 'email'].map((c) => el('col', { class: 'c-' + c }))),
-          el('thead', {}, el('tr', {}, [['#', 'n'], ['Name', 'name'], ['Top executive', 'exec'], ['Company', 'co'], ['Email', 'email']].map(([h, c]) => el('th', { class: c, text: h })))),
+          el('colgroup', {}, ['n', 'name', 'exec', 'co', 'email', 'copy'].map((c) => el('col', { class: 'c-' + c }))),
+          el('thead', {}, el('tr', {}, [['#', 'n'], ['Name', 'name'], ['Top executive', 'exec'], ['Company', 'co'], ['Email', 'email'], ['', 'copy']].map(([h, c]) => el('th', { class: c, text: h })))),
           el('tbody', {}, shown.length ? shown.map((r) => el('tr', { class: r.review ? 'is-rev' : '' },
             el('td', { class: 'n', text: String(r.n) }),
-            el('td', { class: 'name', title: r.name }, el('span', { text: r.name }), el('small', { class: 'dom', text: r.domain })),
-            el('td', { class: 'exec', title: r.review ? 'Not verified yet' : r.exec }, r.review ? el('span', { class: 'rev-tag', text: 'Review' }) : el('span', { text: r.exec })),
-            el('td', { class: 'co', title: r.domain }, el('span', { class: 'co-chip' }, face(r.domain), el('span', { text: r.domain }))),
-            el('td', { class: 'email', title: r.email, text: r.email }))) :
-            el('tr', {}, el('td', { class: 'empty-row', colspan: '5', text: 'Nothing here.' }))))),
+            cell('name', r.name, [el('span', { text: r.name }), el('small', { class: 'dom', text: r.domain })]),
+            r.review ? el('td', { class: 'exec', title: 'Not verified yet' }, el('span', { class: 'rev-tag', text: 'Review' })) : cell('exec', r.exec, el('span', { text: r.exec })),
+            cell('co', r.domain, el('span', { class: 'co-chip' }, face(r.domain), el('span', { text: r.domain }))),
+            cell('email', r.email, r.email),
+            el('td', { class: 'copy' }, el('button', { type: 'button', class: 'row-copy', 'aria-label': `Copy ${r.name}'s row`, title: 'Copy this lead', onclick: () => copyText(line(r)) }, svgIcon('M9 9h10v10H9zM5 15V5h10'))))) :
+            el('tr', {}, el('td', { class: 'empty-row', colspan: '6', text: 'Nothing here.' }))))),
       other.length ? el('div', { class: 'rec-notes' }, other.map((line) => el('p', { text: line.replace(/\*\*/g, '') }))) : null);
   }
+  // Executives already verified in earlier answers in any chat (newest wins), so a new list can reuse
+  // them instead of searching again. Free-mail domains say nothing about a company and are skipped.
+  const FREE_MAIL = new Set('gmail.com googlemail.com yahoo.com ymail.com outlook.com hotmail.com live.com msn.com icloud.com me.com aol.com proton.me protonmail.com gmx.com zoho.com'.split(' '));
+  function knownExecutives(skipMsgId) {
+    const known = new Map();
+    for (const chat of [...state.chats].sort((a, b) => a.updatedAt - b.updatedAt)) {
+      for (const msg of chat.messages) {
+        if (msg.role !== 'bot' || msg.id === skipMsgId) continue;
+        for (const r of msg.results) {
+          const parsed = r.text ? parseRecords(tidy(r.text)) : null;
+          if (!parsed) continue;
+          for (const row of parsed.rows) if (!row.review && !FREE_MAIL.has(row.domain)) known.set(row.domain, { exec: row.exec, at: r.t1 || chat.updatedAt });
+        }
+      }
+    }
+    return known;
+  }
+
   function recordsCsv(name, parsed) {
     const esc = (v) => '"' + String(v ?? '').replace(/"/g, '""') + '"';
     const lines = ['name,email,company,top_executive,status'];
@@ -939,6 +967,7 @@
       r.trace.push(s);
       if (r.trace.length > MAX_TRACE) r.trace.splice(0, r.trace.length - MAX_TRACE);
     };
+    if (payload.known && payload.known.length && !r.trace.some((s) => s.k === 'known')) step({ k: 'known', n: payload.known.length });
     paintResult(chat, msg, i);
     try {
       const out = await ask(payload, {
@@ -982,18 +1011,24 @@
   async function runFiles(chat, msg, files, history) {
     // Read every file in the browser and upload it, three at a time.
     let uploaded = 0;
+    const fileDomains = [];
     await pool(files, 3, async (f, i) => {
       const r = msg.results[i];
       if (state.cancelRequested) return;
       try {
         const prep = await window.Extract.prepare(f.file, f.name);
         const parts = [];
+        const domains = new Set();
         for (const b of prep.blobs) {
+          if (b.mime === 'text/plain') {
+            for (const m of (await b.blob.text()).matchAll(/[\w.%+-]+@([\w-]+(?:\.[\w-]+)*\.[a-z]{2,})/gi)) domains.add(m[1].toLowerCase());
+          }
           const up = await withRetry(() => uploadFile(b));
           parts.push({ uri: up.uri, mimeType: up.mimeType || b.mime });
         }
         r.parts = parts;
         r.uploadedAt = Date.now();
+        fileDomains[i] = [...domains];
       } catch (e) {
         if (e.status === 401) throw e;
         r.state = 'failed';
@@ -1009,11 +1044,14 @@
     paint(chat, msg);
     const todo = msg.results.map((r, i) => i).filter((i) => msg.results[i].parts);
     if (!todo.length) throw new Error('None of the files could be read.');
+    const known = knownExecutives(msg.id);
     await pool(todo, 3, async (i) => {
       if (state.cancelRequested) return;
       const r = msg.results[i];
+      const reuse = (fileDomains[i] || []).filter((d) => known.has(d)).slice(0, 1000)
+        .map((d) => ({ domain: d, exec: known.get(d).exec, found: new Date(known.get(d).at).toISOString().slice(0, 10) }));
       try {
-        await answerOne(chat, msg, i, { task: msg.task, useSearch: msg.useSearch, name: r.name, parts: r.parts, history });
+        await answerOne(chat, msg, i, { task: msg.task, useSearch: msg.useSearch, name: r.name, parts: r.parts, history, ...(reuse.length ? { known: reuse } : {}) });
       } catch (e) {
         if (e !== STOPPED) throw e;
       }

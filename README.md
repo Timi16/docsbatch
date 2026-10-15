@@ -38,6 +38,12 @@ Local test: `npx vercel dev` with a `.env.local` copied from `.env.example`.
   done it sums up, e.g. "Searched the web 8 times · 25 sites · 50s". Sources sit behind a **Sources** button.
 - **Stop / Continue:** Stop ends a run and keeps what was written. **Continue** picks up a stopped answer where it
   left off; **Retry** reruns a failed one. Uploaded files can be reused this way for 40 hours.
+- **Lead lists:** answers with one lead per record ("Name email Executive") show as a table with All / Verified /
+  Review filters. Click a cell to copy it, use the row's copy button for the whole lead, or **Copy rows** /
+  **Copy for Sheets** for everything the filter shows. A later REVIEW pass is merged into the same rows.
+- **Earlier leads are remembered:** before a new list runs, executives already verified in any earlier chat (in this
+  browser) are passed to the model for matching email domains, so it reuses them instead of searching again. The
+  progress line says e.g. "reused 37 from earlier". Free-mail domains such as gmail.com are skipped.
 - **Download:** the arrow at the top right saves the chat as a PDF file (your messages and every answer), or every
   answer as CSV, JSON, Markdown or plain text. Each answer also has its own **PDF** button. PDFs use a standard font,
   so text in non-Latin scripts may not show correctly in them.

@@ -31,6 +31,21 @@ function cleanHistory(history) {
   return out;
 }
 
+// Executives the page already verified in earlier chats, for the leads in this file. The model reuses
+// them instead of searching again, which saves search credits.
+function knownNote(known) {
+  if (!Array.isArray(known)) return '';
+  const lines = known.slice(0, 1000).map((k) => {
+    if (!k || typeof k !== 'object') return '';
+    const domain = String(k.domain || '').trim().slice(0, 100);
+    const exec = String(k.exec || '').replace(/\s+/g, ' ').trim().slice(0, 120);
+    const found = /^\d{4}-\d{2}-\d{2}$/.test(String(k.found || '')) ? ` (found ${k.found})` : '';
+    return domain && exec ? `${domain} — ${exec}${found}` : '';
+  }).filter(Boolean);
+  if (!lines.length) return '';
+  return `\n\nAlready verified in earlier research in this app (email domain — current top executive). For leads with these domains, use the listed executive directly instead of searching again, unless the task gives a specific reason to re-check one:\n${lines.join('\n')}`;
+}
+
 // Models asked to continue sometimes repeat the end of the text first; drop that overlap.
 function dropOverlap(prior, next) {
   const max = Math.min(prior.length, next.length, 600);
@@ -62,6 +77,7 @@ module.exports = streamRoute(async (req, emit) => {
     request = buildRequest(task, item, useSearch);
   }
   request.input.unshift(...cleanHistory(b.history));
+  request.instructions += knownNote(b.known);
   if (prior.trim()) {
     request.input.push({ role: 'assistant', content: prior }, { role: 'user', content: CONTINUE + (useSearch ? PACE : '') + (b.slower ? SLOWER : '') });
   } else if (b.slower) {
