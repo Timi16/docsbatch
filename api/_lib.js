@@ -204,7 +204,11 @@ const SEARCH_TOOL = {
   parameters: { type: 'object', properties: { query: { type: 'string', description: 'The search query' } }, required: ['query'], additionalProperties: false },
   strict: true,
 };
-const searxngUrl = () => String(process.env.SEARXNG_URL || '').trim().replace(/\/+$/, '');
+// Accepts the address with or without https:// and a trailing slash.
+const searxngUrl = () => {
+  const url = String(process.env.SEARXNG_URL || '').trim().replace(/\/+$/, '');
+  return !url || /^https?:\/\//i.test(url) ? url : `https://${url}`;
+};
 const searchConfigured = () => !!searxngUrl();
 const trimResult = (x) => ({
   title: String(x.title || '').slice(0, 150),
@@ -213,7 +217,7 @@ const trimResult = (x) => ({
 });
 
 // One query to your SearXNG server. The X-Search-Key header is what your reverse proxy checks.
-async function searxngSearch(query) {
+async function searxngSearch(query, limit = 5) {
   const params = new URLSearchParams({ q: String(query).slice(0, 300), format: 'json', language: 'en', safesearch: '0' });
   const r = await fetch(`${searxngUrl()}/search?${params}`, {
     headers: { Accept: 'application/json', 'X-Search-Key': process.env.SEARXNG_KEY || '' },
@@ -221,7 +225,7 @@ async function searxngSearch(query) {
   });
   if (!r.ok) return { error: `Search server answered ${r.status}` };
   const data = await r.json();
-  return { results: (data.results || []).filter((x) => /^https?:\/\//.test(x.url || '')).slice(0, 5).map(trimResult) };
+  return { results: (data.results || []).filter((x) => /^https?:\/\//.test(x.url || '')).slice(0, limit).map(trimResult) };
 }
 
 // Web search goes only to your SearXNG server. A failed or empty search goes back to the model as such
@@ -308,6 +312,6 @@ function normalize(r) {
 
 module.exports = {
   BASE, MAX_UPLOAD_CHUNK_BYTES, MAX_FILE_BYTES, FILE_TTL_SECONDS, SYSTEM, SEARCH_NOTE, FINISH, MORE, ITEMS_PER_TURN,
-  httpError, allowedModels, apiKey, checkAuth, route, streamRoute, openai, openaiStream, SEARCH_TOOL, searchConfigured, webSearch,
+  httpError, allowedModels, apiKey, checkAuth, route, streamRoute, openai, openaiStream, SEARCH_TOOL, searchConfigured, webSearch, searxngSearch,
   cleanTask, cleanModel, cleanItem, buildRequest, normalize,
 };

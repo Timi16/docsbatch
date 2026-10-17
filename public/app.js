@@ -142,10 +142,11 @@
     while (Date.now() < until && !state.cancelRequested) await sleep(Math.min(250, until - Date.now()));
   }
   // Sends one request and reads its progress events as they arrive; resolves with the final result.
-  async function streamInstant(json, onEvent) {
+  const streamInstant = (json, onEvent) => streamApi('instant', json, onEvent);
+  async function streamApi(path, json, onEvent) {
     const h = { 'Content-Type': 'application/json' };
     if (state.pw) h['x-app-password'] = state.pw;
-    const res = await fetch('/api/instant', { method: 'POST', headers: h, body: JSON.stringify(json), signal: state.abort.signal });
+    const res = await fetch('/api/' + path, { method: 'POST', headers: h, body: JSON.stringify(json), signal: state.abort.signal });
     if (!res.ok) {
       let data = null;
       try { data = await res.json(); } catch { /* use the status */ }
@@ -614,6 +615,11 @@
     const tab = (f, label, n) => el('button', { type: 'button', class: 'rec-tab' + (filter === f ? ' on' : ''), 'aria-pressed': String(filter === f), onclick: () => setFilter(f) }, label, el('span', { text: String(n) }));
     const shown = rows.map((r, n) => ({ ...r, n: n + 1 })).filter((r) => filter === 'all' || (filter === 'rev' ? r.review : !r.review));
     const line = (r) => `${r.name} ${r.email} ${r.review ? 'REVIEW' : r.exec}`;
+    // From the lead research engine: where each name came from, and why others are Review.
+    const found = msg.results[i].found || {};
+    const proof = (f) => (f && f.url && /^https?:\/\//.test(f.url)
+      ? el('a', { class: 'proof', href: f.url, target: '_blank', rel: 'noopener noreferrer', title: `${f.title ? f.title + ' · ' : ''}${f.quote ? '“' + f.quote + '”' : 'Source'}`, onclick: (e) => e.stopPropagation() }, '↗')
+      : null);
     const copyRows = () => copyText(shown.map(line).join('\n\n'));
     const copySheets = () => copyText(['Name\tEmail\tCompany\tTop executive\tStatus', ...shown.map((r) => [r.name, r.email, r.domain, r.review ? '' : r.exec, r.review ? 'Review' : 'Verified'].join('\t'))].join('\n'));
     const cell = (cls, value, kids) => el('td', { class: cls + ' copyable', title: `${value} · click to copy`, onclick: () => copyText(value) }, kids);
@@ -636,7 +642,9 @@
           el('tbody', {}, shown.length ? shown.map((r) => el('tr', { class: r.review ? 'is-rev' : '' },
             el('td', { class: 'n', text: String(r.n) }),
             cell('name', r.name, [el('span', { text: r.name }), el('small', { class: 'dom', text: r.domain })]),
-            r.review ? el('td', { class: 'exec', title: 'Not verified yet' }, el('span', { class: 'rev-tag', text: 'Review' })) : cell('exec', r.exec, el('span', { text: r.exec })),
+            r.review
+              ? el('td', { class: 'exec', title: FREE_MAIL.has(r.domain) ? 'Personal email address, so there is no company to research' : (found[r.domain] && found[r.domain].reason) || 'Not verified yet' }, el('span', { class: 'rev-tag', text: 'Review' }))
+              : cell('exec', r.exec, [el('span', { text: r.exec }), proof(found[r.domain])]),
             cell('co', r.domain, el('span', { class: 'co-chip' }, face(r.domain), el('span', { text: r.domain }))),
             cell('email', r.email, r.email),
             el('td', { class: 'copy' }, el('button', { type: 'button', class: 'row-copy', 'aria-label': `Copy ${r.name}'s row`, title: 'Copy this lead', onclick: () => copyText(line(r)) }, svgIcon('M9 9h10v10H9zM5 15V5h10'))))) :
@@ -1008,6 +1016,122 @@
     }
   }
 
+  // ---- lead research engine ----------------------------------------------
+  // Lead lists ("Name email ...") asking for each company's top executive go to /api/leads, which researches
+  // each company once (its website, then SearXNG) and only accepts names found word for word in the evidence.
+  const LEAD_TASK = /\b(top\s+exec|executive|ceo|chief exec|owner|founder|president|decision[- ]?maker|leadership)\b/i;
+  const LEAD_BATCH = 24;
+  function parseLeads(text) {
+    const leads = [];
+    for (const raw of String(text || '').split('\n')) {
+      const m = raw.match(/([\w.%+'-]+@([\w-]+(?:\.[\w-]+)*\.[a-z]{2,}))/i);
+      if (!m) continue;
+      const name = raw.slice(0, m.index).replace(/[\t,;|]+/g, ' ').trim().replace(/\s+/g, ' ').slice(0, 60);
+      leads.push({ n: name, e: m[1] });
+    }
+    return leads;
+  }
+  const leadDomain = (email) => email.split('@')[1].toLowerCase();
+  // The answer text in the requested format: every lead in the original order, one per record.
+  function buildLeadText(r, final) {
+    const rows = [];
+    let verified = 0;
+    for (const l of r.leads) {
+      const d = leadDomain(l.e);
+      const f = FREE_MAIL.has(d) ? { status: 'review' } : r.found[d];
+      if (!f && !final) continue;
+      const ok = f && f.status === 'verified';
+      if (ok) verified++;
+      rows.push(`${l.n || '-'} ${l.e} ${ok ? f.name : 'REVIEW'}`);
+    }
+    let text = rows.join('\n\n');
+    if (final) text += `\n\nTOTAL LEADS = ${r.leads.length} · VERIFIED = ${verified} · REVIEW = ${r.leads.length - verified}`;
+    return text;
+  }
+
+  async function runLeads(chat, msg, i) {
+    const r = msg.results[i];
+    r.state = 'working';
+    r.retrying = false;
+    r.t0 = Date.now();
+    delete r.t1;
+    delete r.error;
+    r.trace = r.trace || [];
+    r.found = r.found || {};
+    const step = (s) => { r.trace.push(s); if (r.trace.length > MAX_TRACE) r.trace.splice(0, r.trace.length - MAX_TRACE); };
+    const domains = [...new Set(r.leads.map((l) => leadDomain(l.e)))].filter((d) => !FREE_MAIL.has(d));
+    // Companies already verified in earlier chats are reused instead of researched again.
+    const known = knownExecutives(msg.id);
+    let reused = 0;
+    for (const d of domains) if (!r.found[d] && known.has(d)) { r.found[d] = { status: 'verified', name: known.get(d).exec, via: 'earlier' }; reused++; }
+    if (reused) step({ k: 'known', n: reused });
+    const fails = {};
+    let todo = domains.filter((d) => !r.found[d]);
+    const progress = () => {
+      const done = domains.filter((d) => r.found[d]).length;
+      const ok = domains.filter((d) => r.found[d] && r.found[d].status === 'verified').length;
+      r.phase = `Researched ${done} of ${domains.length} companies · ${ok} verified`;
+      r.text = buildLeadText(r, false);
+    };
+    progress();
+    paintResult(chat, msg, i);
+    let attempt = 0;
+    while (todo.length) {
+      if (state.cancelRequested) { r.state = 'stopped'; break; }
+      const batch = todo.slice(0, LEAD_BATCH);
+      let result = null;
+      try {
+        const contacts = Object.fromEntries(batch.map((d) => [d, [...new Set(r.leads.filter((l) => leadDomain(l.e) === d).map((l) => l.n).filter(Boolean))].slice(0, 3)]));
+        result = await streamApi('leads', { domains: batch, contacts }, (ev) => {
+          if (ev.type === 'open') step({ k: 'open', url: ev.url });
+          else if (ev.type === 'search') { step({ k: 'search', q: ev.queries, urls: (ev.urls || []).slice(0, 5) }); r.phase = `Searching “${ev.queries[0]}”`; }
+          else if (ev.type === 'company') r.phase = `Researching ${ev.domain}`;
+          else if (ev.type === 'domain') {
+            if (ev.status === 'error') return;
+            r.found[ev.domain] = ev.status === 'verified'
+              ? { status: 'verified', name: ev.name, title: ev.title, url: ev.url, quote: ev.quote }
+              : { status: 'review', reason: ev.reason };
+            progress();
+          }
+          r.retrying = false;
+          paintSoon(chat, msg, i);
+        });
+        attempt = 0;
+      } catch (e) {
+        if (state.cancelRequested) { r.state = 'stopped'; break; }
+        if (e.status === 401) throw e;
+        if (e.status >= 400 && e.status < 500 && e.status !== 408 && e.status !== 429) {
+          r.state = 'failed';
+          r.warning = `Stopped before the end: ${e.message}`;
+          break;
+        }
+        attempt++;
+        r.retrying = true;
+        r.phase = `Retrying (${attempt}) · ${String(e.message || 'no answer').slice(0, 120)}`;
+        paintSoon(chat, msg, i);
+        await pause(retryDelay(attempt));
+      }
+      // Companies that errored are tried again later; after three failures they become Review.
+      for (const d of batch) {
+        if (r.found[d]) continue;
+        const errored = result && result.results.some((x) => x.domain === d && x.status === 'error');
+        if (errored && (fails[d] = (fails[d] || 0) + 1) >= 3) r.found[d] = { status: 'review', reason: 'Research kept failing for this company' };
+      }
+      todo = todo.filter((d) => !r.found[d]);
+      progress();
+      paintSoon(chat, msg, i);
+    }
+    r.text = buildLeadText(r, r.state !== 'stopped');
+    if (r.state === 'working') r.state = 'done';
+    r.t1 = Date.now();
+    r.phase = '';
+    r.sources = [];
+    clearTimeout(paintTimers.get(`${msg.id}:${i}`));
+    paintTimers.delete(`${msg.id}:${i}`);
+    paintResult(chat, msg, i);
+    if (r.state === 'stopped') throw STOPPED;
+  }
+
   async function runFiles(chat, msg, files, history) {
     // Read every file in the browser and upload it, three at a time.
     let uploaded = 0;
@@ -1017,6 +1141,18 @@
       if (state.cancelRequested) return;
       try {
         const prep = await window.Extract.prepare(f.file, f.name);
+        if (msg.useSearch && LEAD_TASK.test(msg.task)) {
+          const texts = await Promise.all(prep.blobs.filter((b) => b.mime === 'text/plain').map((b) => b.blob.text()));
+          const leads = parseLeads(texts.join('\n'));
+          if (leads.length >= 3) {
+            r.leads = leads;
+            r.uploadedAt = Date.now();
+            uploaded++;
+            msg.note = `Reading files · ${uploaded} of ${files.length}`;
+            paint(chat, msg);
+            return;
+          }
+        }
         const parts = [];
         const domains = new Set();
         for (const b of prep.blobs) {
@@ -1042,12 +1178,16 @@
     msg.note = '';
     msg.results.forEach((r, i) => { if (r.state === 'failed') paintResult(chat, msg, i); });
     paint(chat, msg);
-    const todo = msg.results.map((r, i) => i).filter((i) => msg.results[i].parts);
+    const todo = msg.results.map((r, i) => i).filter((i) => msg.results[i].parts || msg.results[i].leads);
     if (!todo.length) throw new Error('None of the files could be read.');
     const known = knownExecutives(msg.id);
     await pool(todo, 3, async (i) => {
       if (state.cancelRequested) return;
       const r = msg.results[i];
+      if (r.leads) {
+        try { await runLeads(chat, msg, i); } catch (e) { if (e !== STOPPED) throw e; }
+        return;
+      }
       const reuse = (fileDomains[i] || []).filter((d) => known.has(d)).slice(0, 1000)
         .map((d) => ({ domain: d, exec: known.get(d).exec, found: new Date(known.get(d).at).toISOString().slice(0, 10) }));
       try {
@@ -1060,7 +1200,7 @@
   }
 
   function canResume(msg, r) {
-    if (msg.kind !== 'files') return true;
+    if (msg.kind !== 'files' || r.leads) return true;
     return !!(r.parts && Date.now() - (r.uploadedAt || 0) < UPLOAD_REUSE_MS);
   }
   // Continues a stopped answer from where it ended, or retries a failed one.
@@ -1076,6 +1216,7 @@
     beginRun(chat);
     const history = historyBefore(chat, chat.messages[chat.messages.indexOf(msg) - 1]?.id);
     try {
+      if (r.leads) { await runLeads(chat, msg, i); endRun(chat, msg); return; }
       await answerOne(chat, msg, i, msg.kind === 'files'
         ? { task: msg.task, useSearch: msg.useSearch, name: r.name, parts: r.parts, history }
         : { message: msg.task, useSearch: msg.useSearch, history });
