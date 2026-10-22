@@ -33,8 +33,9 @@ module.exports = streamRoute(async (req, emit) => {
       try {
         result = await researchDomain(domain, model, (ev) => emit({ ...ev, domain }), usage, namesFor(domain));
       } catch (e) {
-        // No credit left (402) or a rejected request will not fix itself: stop the batch and say why.
-        if (e.status && e.status >= 400 && e.status < 500 && e.status !== 429) throw e;
+        // Only problems that stop every company end the batch: no OpenAI credit (402) or a key/permission
+        // problem (401/403). Anything else affects just this company, which the page retries later.
+        if ([401, 402, 403].includes(e.status)) throw e;
         result = { domain, status: 'error', reason: e.message || 'Research failed' };
       }
       usage.searches += result.searches || 0;

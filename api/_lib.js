@@ -120,13 +120,24 @@ function upstreamError(status, data) {
   return httpError(status === 429 ? 429 : status >= 500 || status === 401 || status === 403 ? 502 : status, msg);
 }
 
+// Text cut in the middle of an emoji leaves half a character (a lone surrogate), and OpenAI rejects the whole
+// request as "Invalid body: failed to parse JSON value". Website text can contain anything, so every string
+// sent to OpenAI is cleaned first.
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
+function wellFormed(value) {
+  if (typeof value === 'string') return value.replace(LONE_SURROGATE, '');
+  if (Array.isArray(value)) return value.map(wellFormed);
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, wellFormed(v)]));
+  return value;
+}
+
 // Calls the processing API with the server-side key.
 async function openai(path, { method = 'GET', json, body } = {}) {
   const h = { Authorization: `Bearer ${apiKey()}` };
   let payload = body;
   if (json !== undefined) {
     h['Content-Type'] = 'application/json';
-    payload = JSON.stringify(json);
+    payload = JSON.stringify(wellFormed(json));
   }
   const r = await fetch(BASE + path, { method, headers: h, body: payload });
   const text = await r.text();
@@ -150,7 +161,7 @@ async function openaiStream(json, { softMs, hardMs, onProgress = () => {} }) {
     const r = await fetch(`${BASE}/responses`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${apiKey()}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...json, stream: true }),
+      body: JSON.stringify(wellFormed({ ...json, stream: true })),
       signal: ctrl.signal,
     });
     if (!r.ok) {
