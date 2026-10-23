@@ -55,6 +55,10 @@ local SearXNG, start it with Docker (see `searxng/README.md`) and set `SEARXNG_U
 - **Earlier leads are remembered:** before a new list runs, executives already verified in any earlier chat (in this
   browser) are passed to the model for matching email domains, so it reuses them instead of searching again. The
   progress line says e.g. "reused 37 from earlier". Free-mail domains such as gmail.com are skipped.
+- **OpenAI credit:** the sidebar can show the credit left, e.g. "$2.31 left of $5.00", turning red under 20%. OpenAI
+  has no balance API, so it is the credit you set (`OPENAI_CREDIT`) minus the cost OpenAI reports since
+  `OPENAI_CREDIT_SINCE`, read with an admin key (`OPENAI_ADMIN_KEY`). OpenAI's cost report can lag a few hours.
+  Without an admin key the card is hidden.
 - **Download:** the arrow at the top right saves the chat as a PDF file (your messages and every answer), or every
   answer as CSV, JSON, Markdown or plain text. Each answer also has its own **PDF** button. PDFs use a standard font,
   so text in non-Latin scripts may not show correctly in them.

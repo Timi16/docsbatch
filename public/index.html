@@ -37,6 +37,12 @@
       </nav>
       <div class="chat-list" id="chatList"></div>
       <div class="side-foot">
+        <button type="button" class="balance" id="balance" hidden title="From OpenAI's cost report, which can lag a few hours. Click to refresh.">
+          <span class="bal-label">OpenAI credit</span>
+          <span class="bal-amount" id="balAmount"></span>
+          <span class="bal-sub" id="balSub"></span>
+          <span class="bal-bar" id="balBar" hidden><i></i></span>
+        </button>
         <div class="who">
           <span class="logo" aria-hidden="true"><svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><path d="M5 7h14M5 12h14M5 17h8"/></svg></span>
           <div>

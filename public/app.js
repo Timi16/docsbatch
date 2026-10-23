@@ -918,6 +918,7 @@
     chat.updatedAt = Date.now();
     save(true);
     renderAll();
+    loadBalance();
   }
 
   async function send() {
@@ -1338,6 +1339,35 @@
   }
 
   // ---- setup -------------------------------------------------------------
+  // OpenAI credit left = credit added − cost OpenAI reports since then (see api/balance.js). Hidden when the site
+  // owner has not set an admin key.
+  async function loadBalance() {
+    const box = $('#balance');
+    try {
+      const b = await api('balance');
+      if (!b || !b.configured) { box.hidden = true; return; }
+      const money = (n) => `$${Number(n).toFixed(2)}`;
+      const since = new Date(`${b.since}T00:00:00Z`).toLocaleDateString(undefined, { day: 'numeric', month: 'short', timeZone: 'UTC' });
+      const bar = $('#balBar');
+      if (b.remaining != null) {
+        const left = Math.max(0, b.remaining);
+        $('#balAmount').textContent = `${money(left)} left`;
+        $('#balSub').textContent = `of ${money(b.credit)} · ${money(b.spent)} spent since ${since}`;
+        bar.hidden = false;
+        bar.firstElementChild.style.width = `${Math.min(100, (left / b.credit) * 100)}%`;
+        box.classList.toggle('low', left / b.credit < 0.2);
+      } else {
+        $('#balAmount').textContent = `${money(b.spent)} spent`;
+        $('#balSub').textContent = `since ${since}`;
+        bar.hidden = true;
+        box.classList.remove('low');
+      }
+      box.hidden = false;
+    } catch {
+      box.hidden = true;
+    }
+  }
+
   async function loadConfig() {
     try {
       const c = await api('config');
@@ -1428,6 +1458,8 @@
 
     renderAll();
     loadConfig();
+    loadBalance();
+    $('#balance').addEventListener('click', loadBalance);
     input.focus();
   }
 
