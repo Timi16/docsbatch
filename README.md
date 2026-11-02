@@ -57,9 +57,8 @@ local SearXNG, start it with Docker (see `searxng/README.md`) and set `SEARXNG_U
     company), hold the top role, and be confident enough; a name found only on a data site (RocketReach, Craft…)
     needs a higher bar. Outcome per company: **Verified**, **Likely** (a real candidate that narrowly failed a check;
     confirm ✓ or reject ✕ it in the table) or **Not found** with the reason and how many pages and searches were tried.
-  - **Search engines:** each query goes to one engine at a time (Bing, Yahoo, DuckDuckGo, Brave, Google, Qwant),
-    chosen by which have been returning results, paced, and rested for 10 minutes when they block; an empty answer
-    is retried once on another engine.
+  - **Search engines:** each query goes to all of SearXNG's engines at once (it merges their results and skips the
+    ones blocking it); searches are paced so the engines never see a burst, and an empty answer is retried once.
   Every lead comes back in the original order with exact totals. ↗ next to a name opens the source and shows the
   quote. The CSV includes status, likely candidate, source and reason. Personal emails (gmail etc.) are Not found:
   there is no company to research.

@@ -1,10 +1,9 @@
 'use strict';
 // Lead research engine: finds the current top executive of a company (from a lead's email domain).
-// It is a budgeted best-first search: research moves (company website, common pages, sitemap, searches on one
-// engine at a time) are tried most-promising first; after each round a judge (the model, reading only the
+// It is a budgeted best-first search: research moves (company website, common pages, sitemap, searches on your SearXNG) are tried most-promising first; after each round a judge (the model, reading only the
 // evidence) names a candidate, and code decides whether it counts. Each round's findings (the real company name,
 // its location, a VP instead of the boss, a suggested search) unlock better moves for the next round, until the
-// executive is verified or the company's budget is spent. Outcome: verified, likely (a strong candidate that
+// executive is verified or the company's budget is spent (at most 3 judge rounds and 4 searches). Outcome: verified, likely (a strong candidate that
 // narrowly failed a check, for a person to confirm) or not found, always with the reason and what was tried.
 const { openai, searxngSearch, searchConfigured, normalize } = require('./_lib');
 
@@ -166,60 +165,35 @@ async function moveDeepSite(st, emit) {
   await readPages(st, urls, emit);
 }
 
-// ---- search engines: one engine per query, rotated by success, paced, and rested when they block -----
-
-const ENGINES = ['bing', 'yahoo', 'duckduckgo', 'brave', 'google', 'qwant'];
-const engines = new Map(ENGINES.map((e) => [e, { tries: 0, wins: 0, restUntil: 0, nextAt: 0 }]));
-const PACE_MS = 1200;
-const REST_MS = 10 * 60 * 1000;
+// ---- searching ------------------------------------------------------------------------------------
+// Each query goes to all engines at once and SearXNG merges their results. (Asking one engine per query was
+// tried and lost most results: blocked engines left many queries with a single source.) Searches are paced
+// across all companies, so the engines never see a burst.
+const PACE_MS = 1000;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+let nextSearchAt = 0;
+const blocked = new Map(); // engine -> last time SearXNG reported it unresponsive
 
-// Upper-confidence-bound choice: engines that have been returning results are favoured, but every healthy
-// engine still gets tried now and then, so a recovered engine is noticed.
-function pickEngine(exclude = []) {
-  const now = Date.now();
-  const ok = ENGINES.filter((e) => !exclude.includes(e) && engines.get(e).restUntil < now);
-  if (!ok.length) return null;
-  const total = ok.reduce((n, e) => n + engines.get(e).tries, 0) + 1;
-  let best = null;
-  let bestScore = -1;
-  for (const e of ok) {
-    const s = engines.get(e);
-    const score = (s.wins + 1) / (s.tries + 2) + Math.sqrt((2 * Math.log(total)) / (s.tries + 1));
-    if (score > bestScore) { best = e; bestScore = score; }
-  }
-  return best;
-}
-
-async function searchOnce(query, engine) {
-  const s = engines.get(engine);
-  const wait = s.nextAt - Date.now();
-  s.nextAt = Math.max(Date.now(), s.nextAt) + PACE_MS;
+async function pacedSearch(query) {
+  const wait = nextSearchAt - Date.now();
+  nextSearchAt = Math.max(Date.now(), nextSearchAt) + PACE_MS;
   if (wait > 0) await sleep(wait);
-  let res;
-  try { res = await searxngSearch(query, 8, { engines: engine }); } catch { res = { results: [], unresponsive: [engine] }; }
-  s.tries++;
-  if ((res.unresponsive || []).includes(engine) || res.error) s.restUntil = Date.now() + REST_MS;
-  else if ((res.results || []).length) s.wins++;
-  return res.results || [];
+  try {
+    const res = await searxngSearch(query, 8);
+    for (const e of res.unresponsive || []) blocked.set(e, Date.now());
+    return res.results || [];
+  } catch {
+    return [];
+  }
 }
 
-// One query: the best engine first; if it is blocked or finds nothing, one other engine.
+// One query, no automatic re-try (every extra search adds to the load that gets the server blocked).
 async function moveSearch(st, query, emit) {
   st.tried.add(query.toLowerCase());
-  const used = [];
-  for (let attempt = 0; attempt < 2; attempt++) {
-    const engine = pickEngine(used);
-    if (!engine) break;
-    used.push(engine);
-    const results = await searchOnce(query, engine);
-    st.searches++;
-    emit({ type: 'search', queries: [query], urls: results.map((x) => x.url).slice(0, 5), via: engine });
-    if (results.length) {
-      addEvidence(st, `SEARCH "${query}" (${engine})`, results.map((x) => `- ${x.title} — ${x.content} (${x.url})`).join('\n'));
-      return;
-    }
-  }
+  const results = await pacedSearch(query);
+  st.searches++;
+  emit({ type: 'search', queries: [query], urls: results.map((x) => x.url).slice(0, 5) });
+  if (results.length) addEvidence(st, `SEARCH "${query}"`, results.map((x) => `- ${x.title} — ${x.content} (${x.url})`).join('\n'));
 }
 
 // ---- evidence -------------------------------------------------------------------------------------
@@ -259,6 +233,7 @@ function evidenceText(st, cap = 14000) {
 // ---- the plan: which searches to try next, best first, from what is known so far ----------------
 
 function nextQueries(st, contacts, n) {
+  if (n <= 0) return [];
   const name = st.legal && st.legal.split(/\s+/).length >= 2 && st.legal.length < 60 ? st.legal.replace(/,?\s*(inc|llc|ltd|corp|co)\.?$/i, '') : st.company;
   // A short or one-word name ("Emerge") matches many companies, so the web address stands in for it.
   const generic = name.split(/\s+/).length < 2 || name.length < 9;
@@ -381,11 +356,12 @@ function accept(pick, evidence, company = '', domain = '') {
 
 // Budget per company: rounds of moves, each ending with the judge. Most companies are verified in the
 // first round; the budget only runs out on companies that publish their leader nowhere we can reach.
+// Website first: the whole site (home, linked pages, sitemap, common pages) is read and judged before any
+// search. Searches are capped at 4 per company, because heavy searching is what gets a search server blocked.
 const ROUNDS = [
-  { site: 'home', searches: 2 },
-  { site: 'deep', searches: 3 },
-  { searches: 3 },
-  { searches: 3 },
+  { site: true, searches: 0 },
+  { searches: 2 },
+  { searches: 2 },
 ];
 const MAX_MS = 120000;
 
@@ -402,8 +378,7 @@ async function researchDomain(domain, model, emit, usage, contacts = []) {
   for (const round of ROUNDS) {
     if (Date.now() - started > MAX_MS) break;
     const before = st.evidence.length;
-    if (round.site === 'home') { await moveHome(st, emit); await readPages(st, st.links.slice(0, 4), emit); }
-    if (round.site === 'deep') await moveDeepSite(st, emit);
+    if (round.site) { await moveHome(st, emit); await readPages(st, st.links.slice(0, 4), emit); await moveDeepSite(st, emit); }
     if (canSearch) for (const q of nextQueries(st, contacts, round.searches)) await moveSearch(st, q, emit);
     if (st.evidence.length === before && st.judges) continue; // nothing new to judge
     const judged = await judge(st, model, usage, contacts);
@@ -425,7 +400,7 @@ async function researchDomain(domain, model, emit, usage, contacts = []) {
   return { domain, company: st.company, status: 'review', code: last.code, reason: `${reason} (${tried})`, searches: st.searches, pages: st.pages, rounds: st.judges };
 }
 
-// Which engines are answering right now (for the progress trail).
-const engineHealth = () => Object.fromEntries(ENGINES.map((e) => [e, engines.get(e).restUntil > Date.now() ? 'resting' : 'ok']));
+// Engines SearXNG reported as blocked in the last 10 minutes (for the progress trail).
+const engineHealth = () => Object.fromEntries([...blocked].filter(([, t]) => Date.now() - t < 10 * 60 * 1000).map(([e]) => [e, 'blocked']));
 
 module.exports = { researchDomain, accept, fold, engineHealth, nextQueries };

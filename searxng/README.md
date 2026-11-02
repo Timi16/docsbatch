@@ -39,7 +39,8 @@ curl -s "http://127.0.0.1:8080/search?q=Superfeet+CEO&format=json" | python3 -c 
 
 ## What to expect
 
-SearXNG has no index of its own: each search asks Google, Bing, DuckDuckGo, Brave, Qwant and Yahoo for their results.
+SearXNG has no index of its own: each search asks Bing, DuckDuckGo, Brave and Yahoo for their results (Google and Qwant
+are left out because they refuse servers outright).
 Those sites block automated searches, especially from servers. In a local test (October 2026) on a home connection:
 
 - Google answered "access denied", DuckDuckGo and Qwant showed CAPTCHAs, and Brave rate-limited after a few searches.
@@ -49,5 +50,9 @@ So results depend on which engines your server's IP is allowed to use, and that 
 finds nothing for a lead, the model marks it unverified (REVIEW) rather than guessing. The app sends at most two
 searches at a time to avoid bursts. If an engine you rely on is blocked, check the command above, and edit the engine list in
 `config/settings.yml` (then `docker compose restart`).
+
+Heavy use wears engines out: they start refusing, or quietly return unrelated results to a server they flag as a bot.
+DocBatch reads the company website first and caps searches at 4 per company to keep the load low. Keep SearXNG up to
+date, since engines change their pages and old versions stop reading them:
 
 Updating: `docker compose pull && docker compose up -d`.
