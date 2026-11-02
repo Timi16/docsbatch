@@ -176,6 +176,7 @@ button { cursor: pointer; }
 .step::before { content: ''; position: absolute; left: -22px; top: 6px; width: 8px; height: 8px; border-radius: 50%; background: var(--bg); border: 1.5px solid var(--line2); }
 .step.search::before { border-color: var(--accent); }
 .step .q { color: var(--ink); }
+.step .paid { margin-left: 6px; padding: 1px 6px; border-radius: 99px; font-size: 11px; color: var(--muted); border: 1px solid var(--line); }
 .step .q-more { color: var(--muted); font-size: 12.5px; }
 .step .sites { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 5px; }
 .site { display: inline-flex; align-items: center; gap: 6px; max-width: 220px; border: 1px solid var(--line); background: var(--panel); border-radius: 999px; padding: 2px 9px 2px 3px; font-size: 12px; color: var(--ink2); text-decoration: none; }

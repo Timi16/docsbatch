@@ -3,9 +3,10 @@
 // It is a budgeted best-first search: research moves (company website, common pages, sitemap, searches on your SearXNG) are tried most-promising first; after each round a judge (the model, reading only the
 // evidence) names a candidate, and code decides whether it counts. Each round's findings (the real company name,
 // its location, a VP instead of the boss, a suggested search) unlock better moves for the next round, until the
-// executive is verified or the company's budget is spent (at most 3 judge rounds and 4 searches). Outcome: verified, likely (a strong candidate that
+// executive is verified or the company's budget is spent (at most 3 judge rounds and 4 searches). Companies still
+// unsolved then get one last round of Google searches (Serper, paid) when SERPER_KEY is set. Outcome: verified, likely (a strong candidate that
 // narrowly failed a check, for a person to confirm) or not found, always with the reason and what was tried.
-const { openai, searxngSearch, searchConfigured, normalize } = require('./_lib');
+const { openai, searxngSearch, searchConfigured, serperAllowed, serperSearch, normalize } = require('./_lib');
 
 const UA = 'Mozilla/5.0 (compatible; DocBatch/1.0; company research)';
 const ROLE = /\b(chief executive officer|ceo|co-?founder|founder|co-?owner|owner|president|managing director|managing partner|managing member|principal|executive director|general manager|proprietor|commodore|chairman|chairwoman|chairperson)\b/i;
@@ -188,12 +189,13 @@ async function pacedSearch(query) {
 }
 
 // One query, no automatic re-try (every extra search adds to the load that gets the server blocked).
-async function moveSearch(st, query, emit) {
-  st.tried.add(query.toLowerCase());
-  const results = await pacedSearch(query);
-  st.searches++;
-  emit({ type: 'search', queries: [query], urls: results.map((x) => x.url).slice(0, 5) });
-  if (results.length) addEvidence(st, `SEARCH "${query}"`, results.map((x) => `- ${x.title} — ${x.content} (${x.url})`).join('\n'));
+// With `google`, it is a paid Serper search, counted separately and labelled in the progress trail.
+async function moveSearch(st, query, emit, google = false) {
+  (google ? st.triedGoogle : st.tried).add(query.toLowerCase());
+  const results = google ? ((await serperSearch(query, 8).catch(() => ({}))).results || []) : await pacedSearch(query);
+  if (google) st.google++; else st.searches++;
+  emit({ type: 'search', queries: [query], urls: results.map((x) => x.url).slice(0, 5), ...(google ? { engine: 'google' } : {}) });
+  if (results.length) addEvidence(st, `${google ? 'GOOGLE' : 'SEARCH'} "${query}"`, results.map((x) => `- ${x.title} — ${x.content} (${x.url})`).join('\n'));
 }
 
 // ---- evidence -------------------------------------------------------------------------------------
@@ -232,7 +234,7 @@ function evidenceText(st, cap = 14000) {
 
 // ---- the plan: which searches to try next, best first, from what is known so far ----------------
 
-function nextQueries(st, contacts, n) {
+function nextQueries(st, contacts, n, tried = st.tried) {
   if (n <= 0) return [];
   const name = st.legal && st.legal.split(/\s+/).length >= 2 && st.legal.length < 60 ? st.legal.replace(/,?\s*(inc|llc|ltd|corp|co)\.?$/i, '') : st.company;
   // A short or one-word name ("Emerge") matches many companies, so the web address stands in for it.
@@ -259,7 +261,7 @@ function nextQueries(st, contacts, n) {
   ];
   const out = [];
   for (const q of plan) {
-    if (!q || st.tried.has(q.toLowerCase()) || out.includes(q)) continue;
+    if (!q || tried.has(q.toLowerCase()) || out.includes(q)) continue;
     out.push(q);
     if (out.length >= n) break;
   }
@@ -358,46 +360,54 @@ function accept(pick, evidence, company = '', domain = '') {
 // first round; the budget only runs out on companies that publish their leader nowhere we can reach.
 // Website first: the whole site (home, linked pages, sitemap, common pages) is read and judged before any
 // search. Searches are capped at 4 per company, because heavy searching is what gets a search server blocked.
+// The last round is Google (paid): only for companies still unsolved, only while Serper has credits left, at
+// most SERPER_PER_COMPANY (default 2) searches. The free rounds stop at FREE_MS so it always has time left.
 const ROUNDS = [
   { site: true, searches: 0 },
   { searches: 2 },
   { searches: 2 },
+  { google: true },
 ];
+const FREE_MS = 90000;
 const MAX_MS = 120000;
+const googlePerCompany = () => Math.max(0, Math.min(4, Number(process.env.SERPER_PER_COMPANY ?? 2) || 0));
 
 async function researchDomain(domain, model, emit, usage, contacts = []) {
   const st = {
     domain, company: stemName(domain), nameFromSite: false, legal: null, location: null, base: null, links: [], read: new Set(),
-    evidence: [], labels: new Set(), tried: new Set(), suggested: [], sawDeputy: false,
-    reachable: false, searches: 0, pages: 0, judges: 0,
+    evidence: [], labels: new Set(), tried: new Set(), triedGoogle: new Set(), suggested: [], sawDeputy: false,
+    reachable: false, searches: 0, google: 0, pages: 0, judges: 0,
   };
   const started = Date.now();
   const canSearch = searchConfigured();
   let best = null;
   let last = { ok: false, code: 'none', reason: 'Nothing found' };
   for (const round of ROUNDS) {
-    if (Date.now() - started > MAX_MS) break;
+    if (Date.now() - started > (round.google ? MAX_MS : FREE_MS)) continue;
     const before = st.evidence.length;
     if (round.site) { await moveHome(st, emit); await readPages(st, st.links.slice(0, 4), emit); await moveDeepSite(st, emit); }
-    if (canSearch) for (const q of nextQueries(st, contacts, round.searches)) await moveSearch(st, q, emit);
+    if (round.google) {
+      if (!googlePerCompany() || !(await serperAllowed())) break;
+      for (const q of nextQueries(st, contacts, googlePerCompany(), st.triedGoogle)) await moveSearch(st, q, emit, true);
+    } else if (canSearch) for (const q of nextQueries(st, contacts, round.searches)) await moveSearch(st, q, emit);
     if (st.evidence.length === before && st.judges) continue; // nothing new to judge
     const judged = await judge(st, model, usage, contacts);
     if (!judged) continue;
     last = accept(judged.pick, judged.evidence, st.company, domain);
     if (last.ok) {
       const p = judged.pick;
-      return { domain, company: st.company, status: 'verified', name: last.name, title: squash(p.title).slice(0, 80) || null, url: p.evidence_url || null, quote: squash(p.evidence_quote).slice(0, 240) || null, searches: st.searches, pages: st.pages, rounds: st.judges };
+      return { domain, company: st.company, status: 'verified', name: last.name, title: squash(p.title).slice(0, 80) || null, url: p.evidence_url || null, quote: squash(p.evidence_quote).slice(0, 240) || null, searches: st.searches, google: st.google, pages: st.pages, rounds: st.judges };
     }
     if (last.likely || (last.code === 'weak' && last.name)) best = { ...judged.pick, name: last.name, reason: last.reason };
   }
-  const tried = `tried ${st.pages} page${st.pages === 1 ? '' : 's'} and ${st.searches} search${st.searches === 1 ? '' : 'es'}`;
+  const tried = `tried ${st.pages} page${st.pages === 1 ? '' : 's'} and ${st.searches} search${st.searches === 1 ? '' : 'es'}${st.google ? ` + ${st.google} Google` : ''}`;
   if (best) {
-    return { domain, company: st.company, status: 'likely', name: best.name, title: squash(best.title).slice(0, 80) || null, url: best.evidence_url || null, quote: squash(best.evidence_quote).slice(0, 240) || null, reason: `${best.reason}; ${tried}`, searches: st.searches, pages: st.pages, rounds: st.judges };
+    return { domain, company: st.company, status: 'likely', name: best.name, title: squash(best.title).slice(0, 80) || null, url: best.evidence_url || null, quote: squash(best.evidence_quote).slice(0, 240) || null, reason: `${best.reason}; ${tried}`, searches: st.searches, google: st.google, pages: st.pages, rounds: st.judges };
   }
   const reason = !st.reachable && !st.evidence.length ? 'Website not reachable and nothing found in search'
     : !st.evidence.length ? 'No leader named on the website or in search'
       : last.reason;
-  return { domain, company: st.company, status: 'review', code: last.code, reason: `${reason} (${tried})`, searches: st.searches, pages: st.pages, rounds: st.judges };
+  return { domain, company: st.company, status: 'review', code: last.code, reason: `${reason} (${tried})`, searches: st.searches, google: st.google, pages: st.pages, rounds: st.judges };
 }
 
 // Engines SearXNG reported as blocked in the last 10 minutes (for the progress trail).

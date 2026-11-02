@@ -15,6 +15,8 @@ browser, so nobody sees anyone else's chats. Set `APP_PASSWORD` so only people y
    - `OPENAI_API_KEY` (required): from https://platform.openai.com/api-keys
    - `APP_PASSWORD` (strongly recommended): without it, anyone with the link can spend your credit
    - `SEARXNG_URL` and `SEARXNG_KEY` (web search, free): your own SearXNG server; see `searxng/README.md`
+   - `SERPER_KEY` (optional, paid): Google results from serper.dev, used only by the lead engine for companies
+     nothing free could solve; see **Lead research engine** below
    - `OPENAI_MODELS` (optional): comma-separated list of allowed models; `gpt-6-luna` is used by default when allowed
 4. Redeploy so the variables take effect.
 
@@ -50,15 +52,20 @@ local SearXNG, start it with Docker (see `searxng/README.md`) and set `SEARXNG_U
     page does not link to (its sitemap and common addresses like `/about-us`, `/leadership`); then searches on your
     SearXNG, worded for the kind of organisation (Commodore for yacht clubs, Executive Director for nonprofits, CEO /
     owner / president / founder for businesses, the web address for one-word names, the lead's own name).
+  - **Google, last and only for leftovers (optional, paid):** with `SERPER_KEY` set, a company still unsolved after
+    the website and 4 free searches gets up to 2 Google searches through serper.dev (2,500 free searches, then about
+    $1 per 1,000). Google's company panel ("CEO: …") is included. It stops when the Serper account is down to
+    `SERPER_MIN_BALANCE` credits (default 0); `SERPER_PER_COMPANY` sets the searches per company (0 turns it off).
+    Each one is labelled **Searched Google · paid** in the progress trail, and the summary counts them.
   - **A judge after each round:** the model names a candidate from the evidence only, and also reports what it learned
     (the real company name, its location, a better next search, a VP instead of the boss). That unlocks better moves
-    for the next round. Up to 4 rounds per company, about 2 minutes at most.
+    for the next round. Up to 4 rounds per company (the last one Google), about 2 minutes at most.
   - **Code decides what counts:** the name must appear word for word in the evidence, be a person (not a title or
     company), hold the top role, and be confident enough; a name found only on a data site (RocketReach, Craft…)
     needs a higher bar. Outcome per company: **Verified**, **Likely** (a real candidate that narrowly failed a check;
     confirm ✓ or reject ✕ it in the table) or **Not found** with the reason and how many pages and searches were tried.
   - **Search engines:** each query goes to all of SearXNG's engines at once (it merges their results and skips the
-    ones blocking it); searches are paced so the engines never see a burst, and an empty answer is retried once.
+    ones blocking it); searches are paced so the engines never see a burst, and are never retried.
   Every lead comes back in the original order with exact totals. ↗ next to a name opens the source and shows the
   quote. The CSV includes status, likely candidate, source and reason. Personal emails (gmail etc.) are Not found:
   there is no company to research.
@@ -125,7 +132,9 @@ password-protected files.
   **Continue**.
 - Chats live in the browser's local storage. Clearing site data deletes them, and they do not sync between devices.
   When storage is full, the oldest chats are dropped first.
-- **Cost:** searches are free (your SearXNG). The only cost is OpenAI: with `gpt-6-luna`, a 12-lead research test
+- **Cost:** chat searches are free (your SearXNG). Lead research may also use Google (Serper) for leftovers, if
+  `SERPER_KEY` is set: about 2 searches per unsolved company, e.g. roughly $1.50 for a 2,000-lead list once the
+  free 2,500 are used. Otherwise the only cost is OpenAI: with `gpt-6-luna`, a 12-lead research test
   used about $0.004, so a 200-lead list is roughly $0.05–0.10. Each request is capped at 16 searches.
   Set a monthly budget limit in your OpenAI settings as a safety net.
 

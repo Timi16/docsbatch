@@ -244,6 +244,51 @@ async function searxngSearch(query, limit = 5, { engines } = {}) {
   };
 }
 
+// Google results from Serper (paid, about $1 per 1,000 searches). Only the lead engine uses it, and only for
+// companies that the website and free searches could not solve; the chat's web search never does.
+const serperConfigured = () => !!String(process.env.SERPER_KEY || '').trim();
+const SERPER_ACCOUNT_MS = 60000;
+let serperAccount = null;
+
+// Searches are allowed while the account has more credits than SERPER_MIN_BALANCE (default 0). The balance is
+// read from Serper at most once a minute.
+async function serperAllowed() {
+  if (!serperConfigured()) return false;
+  if (!serperAccount || Date.now() - serperAccount.at > SERPER_ACCOUNT_MS) {
+    try {
+      const r = await fetch('https://google.serper.dev/account', { headers: { 'X-API-KEY': process.env.SERPER_KEY.trim() }, signal: AbortSignal.timeout(8000) });
+      const data = await r.json().catch(() => ({}));
+      serperAccount = { at: Date.now(), balance: r.ok ? Number(data.balance) || 0 : 0 };
+    } catch {
+      serperAccount = { at: Date.now(), balance: 0 };
+    }
+  }
+  return serperAccount.balance > (Number(process.env.SERPER_MIN_BALANCE) || 0);
+}
+
+async function serperSearch(query, limit = 8) {
+  const r = await fetch('https://google.serper.dev/search', {
+    method: 'POST',
+    headers: { 'X-API-KEY': process.env.SERPER_KEY.trim(), 'Content-Type': 'application/json' },
+    body: JSON.stringify({ q: String(query).slice(0, 300), num: 10 }),
+    signal: AbortSignal.timeout(15000),
+  });
+  if (!r.ok) {
+    if (serperAccount && [400, 401, 402, 403].includes(r.status)) serperAccount.balance = 0; // out of credits or bad key
+    return { error: `Google search answered ${r.status}` };
+  }
+  if (serperAccount) serperAccount.balance--;
+  const data = await r.json();
+  const results = (data.organic || []).map((x) => trimResult({ title: x.title, url: x.link, content: x.snippet }));
+  // Google's company panel often states the CEO or founder outright.
+  const kg = data.knowledgeGraph;
+  if (kg && kg.title) {
+    const facts = Object.entries(kg.attributes || {}).map(([k, v]) => `${k}: ${v}`).join('; ');
+    results.unshift(trimResult({ title: `${kg.title} (Google company panel)`, url: `https://www.google.com/search?q=${encodeURIComponent(query)}`, content: [kg.description, facts].filter(Boolean).join(' — ') }));
+  }
+  return { results: results.slice(0, limit) };
+}
+
 // Web search goes only to your SearXNG server. A failed or empty search goes back to the model as such
 // (it then marks the item unverified); nothing else is ever asked, so search never costs credits.
 async function webSearch(query) {
@@ -329,5 +374,5 @@ function normalize(r) {
 module.exports = {
   BASE, MAX_UPLOAD_CHUNK_BYTES, MAX_FILE_BYTES, FILE_TTL_SECONDS, SYSTEM, SEARCH_NOTE, FINISH, MORE, ITEMS_PER_TURN,
   httpError, allowedModels, apiKey, checkAuth, route, streamRoute, openai, openaiStream, SEARCH_TOOL, searchConfigured, webSearch, searxngSearch,
-  cleanTask, cleanModel, cleanItem, buildRequest, normalize,
+  serperConfigured, serperAllowed, serperSearch, cleanTask, cleanModel, cleanItem, buildRequest, normalize,
 };

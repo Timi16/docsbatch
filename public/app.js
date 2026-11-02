@@ -511,12 +511,13 @@
     const key = `${msg.id}:${i}`;
     const open = state.openTraces.has(key);
     const searches = steps.filter((s) => s.k === 'search').length;
+    const google = steps.filter((s) => s.k === 'search' && s.g).length;
     const reused = (steps.find((s) => s.k === 'known') || {}).n || 0;
     const sites = new Set(steps.flatMap((s) => s.urls || (s.url ? [s.url] : [])).map(host)).size;
     const secs = Math.max(0, Math.round(((r.t1 || Date.now()) - (r.t0 || Date.now())) / 1000));
     const label = working
       ? r.phase || 'Thinking'
-      : (searches ? `Searched the web ${searches} time${searches === 1 ? '' : 's'} · ${sites} site${sites === 1 ? '' : 's'}` : 'Thought it through') + (reused ? ` · reused ${reused} from earlier` : '');
+      : (searches ? `Searched the web ${searches} time${searches === 1 ? '' : 's'}${google ? ` (${google} on Google, paid)` : ''} · ${sites} site${sites === 1 ? '' : 's'}` : 'Thought it through') + (reused ? ` · reused ${reused} from earlier` : '');
     const head = el('button', {
       type: 'button', class: 'trace-head', 'aria-expanded': String(open),
       onclick: () => { if (open) state.openTraces.delete(key); else state.openTraces.add(key); paintResult(chat, msg, i); },
@@ -531,7 +532,7 @@
       box.append(el('ol', { class: 'trace-steps' }, steps.map((s) => {
         if (s.k === 'search') {
           return el('li', { class: 'step search' },
-            el('div', {}, 'Searched ', el('span', { class: 'q', text: `“${s.q[0]}”` })),
+            el('div', {}, s.g ? 'Searched Google ' : 'Searched ', el('span', { class: 'q', text: `“${s.q[0]}”` }), s.g ? el('span', { class: 'paid', text: 'paid' }) : null),
             s.q.length > 1 ? el('div', { class: 'q-more', text: s.q.slice(1).map((q) => `“${q}”`).join(' · ') }) : null,
             s.urls && s.urls.length ? el('div', { class: 'sites' }, s.urls.filter((u, n, all) => all.findIndex((v) => host(v) === host(u)) === n).map((u) => el('a', { class: 'site', href: u, target: '_blank', rel: 'noopener noreferrer', title: u }, face(host(u)), el('span', { text: host(u) })))) : null);
         }
@@ -1115,7 +1116,7 @@
         const contacts = Object.fromEntries(batch.map((d) => [d, [...new Set(r.leads.filter((l) => leadDomain(l.e) === d).map((l) => l.n).filter(Boolean))].slice(0, 3)]));
         result = await streamApi('leads', { domains: batch, contacts }, (ev) => {
           if (ev.type === 'open') step({ k: 'open', url: ev.url });
-          else if (ev.type === 'search') { step({ k: 'search', q: ev.queries, urls: (ev.urls || []).slice(0, 5) }); r.phase = `Searching “${ev.queries[0]}”`; }
+          else if (ev.type === 'search') { step({ k: 'search', q: ev.queries, urls: (ev.urls || []).slice(0, 5), g: ev.engine === 'google' }); r.phase = `Searching ${ev.engine === 'google' ? 'Google ' : ''}“${ev.queries[0]}”`; }
           else if (ev.type === 'company') r.phase = `Researching ${ev.domain}`;
           else if (ev.type === 'domain') {
             if (ev.status === 'error') return;

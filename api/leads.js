@@ -22,7 +22,7 @@ module.exports = streamRoute(async (req, emit) => {
   const namesFor = (d) => (Array.isArray(contacts[d]) ? contacts[d] : []).map((n) => String(n || '').trim().slice(0, 40)).filter(Boolean).slice(0, 3);
 
   const started = Date.now();
-  const usage = { input: 0, output: 0, searches: 0, pages: 0 };
+  const usage = { input: 0, output: 0, searches: 0, google: 0, pages: 0 };
   const results = [];
   let next = 0;
   await Promise.all(Array.from({ length: Math.min(WORKERS, domains.length) }, async () => {
@@ -39,6 +39,7 @@ module.exports = streamRoute(async (req, emit) => {
         result = { domain, status: 'error', reason: e.message || 'Research failed' };
       }
       usage.searches += result.searches || 0;
+      usage.google += result.google || 0;
       usage.pages += result.pages || 0;
       results.push(result);
       emit({ type: 'domain', ...result });
