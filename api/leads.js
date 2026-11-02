@@ -1,6 +1,6 @@
 'use strict';
 const { streamRoute, httpError, cleanModel } = require('./_lib');
-const { researchDomain } = require('./_leads');
+const { researchDomain, engineHealth } = require('./_leads');
 
 // Companies researched at once. Searches inside one company run one after another, so this is also the most
 // searches your SearXNG server gets at the same time.
@@ -45,5 +45,5 @@ module.exports = streamRoute(async (req, emit) => {
     }
   }));
   const done = new Set(results.map((r) => r.domain));
-  return { results, remaining: domains.filter((d) => !done.has(d)), usage };
+  return { results, remaining: domains.filter((d) => !done.has(d)), usage, engines: engineHealth() };
 });

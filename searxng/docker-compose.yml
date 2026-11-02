@@ -13,6 +13,11 @@ services:
     environment:
       - SEARXNG_BASE_URL=https://${SEARXNG_HOSTNAME:-search.example.com}/
       - SEARXNG_SECRET=${SEARXNG_SECRET:?Set SEARXNG_SECRET in .env (openssl rand -hex 32)}
+      # One worker is plenty for DocBatch and keeps memory low on small servers.
+      - GRANIAN_WORKERS=1
+    # Hard limits, so SearXNG can never starve other apps on a shared server (it restarts instead).
+    mem_limit: 320m
+    cpus: 1.0
     cap_drop:
       - ALL
     cap_add:

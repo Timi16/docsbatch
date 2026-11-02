@@ -608,20 +608,27 @@
     const key = `${msg.id}:${i}`;
     const filter = state.recFilter.get(key) || 'all';
     const { rows, other } = parsed;
+    const found = msg.results[i].found || {};
+    const isLikely = (r) => r.review && found[r.domain] && found[r.domain].status === 'likely';
     const review = rows.filter((r) => r.review).length;
+    const likelyCount = rows.filter(isLikely).length;
     const verified = rows.length - review;
     const working = msg.results[i].state === 'working';
     const setFilter = (f) => { state.recFilter.set(key, f); paintResult(chat, msg, i); };
     const tab = (f, label, n) => el('button', { type: 'button', class: 'rec-tab' + (filter === f ? ' on' : ''), 'aria-pressed': String(filter === f), onclick: () => setFilter(f) }, label, el('span', { text: String(n) }));
-    const shown = rows.map((r, n) => ({ ...r, n: n + 1 })).filter((r) => filter === 'all' || (filter === 'rev' ? r.review : !r.review));
+    const shown = rows.map((r, n) => ({ ...r, n: n + 1 })).filter((r) => filter === 'all'
+      || (filter === 'ok' && !r.review) || (filter === 'likely' && isLikely(r)) || (filter === 'rev' && r.review && !isLikely(r)));
+    const status = (r) => (!r.review ? 'Verified' : isLikely(r) ? 'Likely' : 'Not found');
     const line = (r) => `${r.name} ${r.email} ${r.review ? 'REVIEW' : r.exec}`;
     // From the lead research engine: where each name came from, and why others are Review.
-    const found = msg.results[i].found || {};
     const proof = (f) => (f && f.url && /^https?:\/\//.test(f.url)
       ? el('a', { class: 'proof', href: f.url, target: '_blank', rel: 'noopener noreferrer', title: `${f.title ? f.title + ' · ' : ''}${f.quote ? '“' + f.quote + '”' : 'Source'}`, onclick: (e) => e.stopPropagation() }, '↗')
       : null);
     const copyRows = () => copyText(shown.map(line).join('\n\n'));
-    const copySheets = () => copyText(['Name\tEmail\tCompany\tTop executive\tStatus', ...shown.map((r) => [r.name, r.email, r.domain, r.review ? '' : r.exec, r.review ? 'Review' : 'Verified'].join('\t'))].join('\n'));
+    const copySheets = () => copyText(['Name\tEmail\tCompany\tTop executive\tStatus\tLikely candidate\tSource\tReason', ...shown.map((r) => {
+      const f = found[r.domain] || {};
+      return [r.name, r.email, r.domain, r.review ? '' : r.exec, status(r), isLikely(r) ? f.name : '', f.url || '', r.review ? (f.reason || '') : ''].map((v) => String(v).replace(/[\t\n]+/g, ' ')).join('\t');
+    })].join('\n'));
     const cell = (cls, value, kids) => el('td', { class: cls + ' copyable', title: `${value} · click to copy`, onclick: () => copyText(value) }, kids);
     return el('div', { class: 'records' },
       el('div', { class: 'rec-head' },
@@ -629,7 +636,7 @@
           el('b', { text: String(rows.length) }), el('span', { text: rows.length === 1 ? ' lead' : ' leads' }),
           working ? el('span', { class: 'rec-live', text: 'filling in…' }) : null),
         el('div', { class: 'rec-actions' },
-          el('div', { class: 'rec-tabs', role: 'group', 'aria-label': 'Filter rows' }, tab('all', 'All', rows.length), tab('ok', 'Verified', verified), tab('rev', 'Review', review)),
+          el('div', { class: 'rec-tabs', role: 'group', 'aria-label': 'Filter rows' }, tab('all', 'All', rows.length), tab('ok', 'Verified', verified), likelyCount ? tab('likely', 'Likely', likelyCount) : null, tab('rev', 'Not found', review - likelyCount)),
           el('button', { type: 'button', class: 'rec-copy', title: 'Copy the rows shown, one lead per line', onclick: copyRows }, 'Copy rows'),
           el('button', { type: 'button', class: 'rec-copy', title: 'Copy the rows shown as columns for Excel or Google Sheets', onclick: copySheets }, 'Copy for Sheets'))),
       el('div', { class: 'rec-bar', title: `${verified} verified, ${review} to review` },
@@ -642,9 +649,14 @@
           el('tbody', {}, shown.length ? shown.map((r) => el('tr', { class: r.review ? 'is-rev' : '' },
             el('td', { class: 'n', text: String(r.n) }),
             cell('name', r.name, [el('span', { text: r.name }), el('small', { class: 'dom', text: r.domain })]),
-            r.review
-              ? el('td', { class: 'exec', title: FREE_MAIL.has(r.domain) ? 'Personal email address, so there is no company to research' : (found[r.domain] && found[r.domain].reason) || 'Not verified yet' }, el('span', { class: 'rev-tag', text: 'Review' }))
-              : cell('exec', r.exec, [el('span', { text: r.exec }), proof(found[r.domain])]),
+            isLikely(r)
+              ? el('td', { class: 'exec likely', title: `${found[r.domain].reason || ''}${found[r.domain].quote ? ` · “${found[r.domain].quote}”` : ''}` },
+                el('span', { class: 'likely-tag', text: 'Likely' }), el('span', { class: 'likely-name', text: found[r.domain].name }), proof(found[r.domain]),
+                el('button', { type: 'button', class: 'decide ok', title: `Confirm ${found[r.domain].name}`, 'aria-label': `Confirm ${found[r.domain].name}`, onclick: (e) => { e.stopPropagation(); decideLikely(chat, msg, i, r.domain, true); } }, '✓'),
+                el('button', { type: 'button', class: 'decide no', title: 'Reject', 'aria-label': `Reject ${found[r.domain].name}`, onclick: (e) => { e.stopPropagation(); decideLikely(chat, msg, i, r.domain, false); } }, '✕'))
+              : r.review
+                ? el('td', { class: 'exec', title: FREE_MAIL.has(r.domain) ? 'Personal email address, so there is no company to research' : (found[r.domain] && found[r.domain].reason) || 'Not verified yet' }, el('span', { class: 'rev-tag', text: 'Not found' }))
+                : cell('exec', r.exec, [el('span', { text: r.exec }), proof(found[r.domain])]),
             cell('co', r.domain, el('span', { class: 'co-chip' }, face(r.domain), el('span', { text: r.domain }))),
             cell('email', r.email, r.email),
             el('td', { class: 'copy' }, el('button', { type: 'button', class: 'row-copy', 'aria-label': `Copy ${r.name}'s row`, title: 'Copy this lead', onclick: () => copyText(line(r)) }, svgIcon('M9 9h10v10H9zM5 15V5h10'))))) :
@@ -669,10 +681,14 @@
     return known;
   }
 
-  function recordsCsv(name, parsed) {
+  function recordsCsv(name, parsed, found = {}) {
     const esc = (v) => '"' + String(v ?? '').replace(/"/g, '""') + '"';
-    const lines = ['name,email,company,top_executive,status'];
-    for (const r of parsed.rows) lines.push([r.name, r.email, r.domain, r.review ? '' : r.exec, r.review ? 'review' : 'verified'].map(esc).join(','));
+    const lines = ['name,email,company,top_executive,status,likely_candidate,source,reason'];
+    for (const r of parsed.rows) {
+      const f = found[r.domain] || {};
+      const likely = r.review && f.status === 'likely';
+      lines.push([r.name, r.email, r.domain, r.review ? '' : r.exec, !r.review ? 'verified' : likely ? 'likely' : 'not found', likely ? f.name : '', f.url || '', r.review ? (f.reason || (FREE_MAIL.has(r.domain) ? 'Personal email address' : '')) : ''].map(esc).join(','));
+    }
     download(`${String(name || 'leads').replace(/[^\w-]+/g, '-').slice(0, 60)}.csv`, '\ufeff' + lines.join('\r\n'), 'text/csv;charset=utf-8');
   }
 
@@ -687,7 +703,7 @@
     const tools = el('div', { class: 'answer-tools' });
     if (r.state !== 'working' && (r.text || r.error)) tools.append(el('button', { type: 'button', onclick: () => copyText(r.text || r.error) }, 'Copy'));
     if (r.state !== 'working' && r.text) tools.append(el('button', { type: 'button', title: 'Download this answer as a PDF', onclick: () => downloadPdf(multi ? r.name : chat.title, [{ text: r.text, sources: r.sources }]) }, 'PDF'));
-    if (records && r.state !== 'working') tools.append(el('button', { type: 'button', title: 'Download this table as CSV', onclick: () => recordsCsv(multi ? r.name : chat.title, records) }, 'CSV'));
+    if (records && r.state !== 'working') tools.append(el('button', { type: 'button', title: 'Download this table as CSV', onclick: () => recordsCsv(multi ? r.name : chat.title, records, r.found) }, 'CSV'));
     if ((r.state === 'stopped' || r.state === 'failed') && !state.busy && canResume(msg, r)) {
       tools.append(el('button', { type: 'button', onclick: () => resume(chat.id, msg.id, i) }, r.text ? 'Continue' : 'Retry'));
     }
@@ -1046,8 +1062,21 @@
       rows.push(`${l.n || '-'} ${l.e} ${ok ? f.name : 'REVIEW'}`);
     }
     let text = rows.join('\n\n');
-    if (final) text += `\n\nTOTAL LEADS = ${r.leads.length} · VERIFIED = ${verified} · REVIEW = ${r.leads.length - verified}`;
+    if (final) {
+      const likely = r.leads.filter((l) => (r.found[leadDomain(l.e)] || {}).status === 'likely').length;
+      text += `\n\nTOTAL LEADS = ${r.leads.length} · VERIFIED = ${verified} · REVIEW = ${r.leads.length - verified}${likely ? ` (${likely} likely: confirm them in the table)` : ''}`;
+    }
     return text;
+  }
+  // A person confirms or rejects a likely candidate; confirmed names become verified in the answer text.
+  function decideLikely(chat, msg, i, domain, approve) {
+    const r = msg.results[i];
+    const f = r.found && r.found[domain];
+    if (!f) return;
+    r.found[domain] = approve ? { ...f, status: 'verified', approved: true } : { status: 'review', reason: `You rejected ${f.name}` };
+    if (r.leads) r.text = buildLeadText(r, r.state !== 'working');
+    save(true);
+    paintResult(chat, msg, i);
   }
 
   async function runLeads(chat, msg, i) {
@@ -1071,7 +1100,8 @@
     const progress = () => {
       const done = domains.filter((d) => r.found[d]).length;
       const ok = domains.filter((d) => r.found[d] && r.found[d].status === 'verified').length;
-      r.phase = `Researched ${done} of ${domains.length} companies · ${ok} verified`;
+      const likely = domains.filter((d) => r.found[d] && r.found[d].status === 'likely').length;
+      r.phase = `Researched ${done} of ${domains.length} companies · ${ok} verified${likely ? ` · ${likely} likely` : ''}`;
       r.text = buildLeadText(r, false);
     };
     progress();
@@ -1089,8 +1119,8 @@
           else if (ev.type === 'company') r.phase = `Researching ${ev.domain}`;
           else if (ev.type === 'domain') {
             if (ev.status === 'error') return;
-            r.found[ev.domain] = ev.status === 'verified'
-              ? { status: 'verified', name: ev.name, title: ev.title, url: ev.url, quote: ev.quote }
+            r.found[ev.domain] = ev.status === 'verified' || ev.status === 'likely'
+              ? { status: ev.status, name: ev.name, title: ev.title, url: ev.url, quote: ev.quote, reason: ev.reason }
               : { status: 'review', reason: ev.reason };
             progress();
           }

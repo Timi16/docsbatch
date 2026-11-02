@@ -44,14 +44,25 @@ local SearXNG, start it with Docker (see `searxng/README.md`) and set `SEARXNG_U
   Review filters. Click a cell to copy it, use the row's copy button for the whole lead, or **Copy rows** /
   **Copy for Sheets** for everything the filter shows. A later REVIEW pass is merged into the same rows.
 - **Lead research engine:** when an attached file is a lead list (lines with email addresses) and the message asks
-  for each company's top executive / CEO / owner (with Web search on), the app skips the general AI path and runs
-  `/api/leads` instead. For each unique company domain it reads the company's own website (home, About, Team,
-  Leadership, Contact pages and schema.org founder data), searches your SearXNG, and has the model pick the current
-  top executive from that evidence only. Code accepts a name only if it appears word for word in the evidence and
-  looks like a person (not a job title or company name); everything else is Review with a reason. A second pass
-  with more pages and searches runs for companies the first pass could not resolve. Every lead comes back in the
-  original order with exact totals. In the table, ↗ next to a name opens the source and shows the quote; hover a
-  Review tag to see why. Personal emails (gmail etc.) are Review: there is no company to research.
+  for each company's top executive / CEO / owner (with Web search on), the app runs `/api/leads` instead of the
+  general AI path. Per unique company domain it runs a budgeted best-first search:
+  - **Moves**, most promising first: the company's home page and About / Team / Leadership pages; then pages the home
+    page does not link to (its sitemap and common addresses like `/about-us`, `/leadership`); then searches on your
+    SearXNG, worded for the kind of organisation (Commodore for yacht clubs, Executive Director for nonprofits, CEO /
+    owner / president / founder for businesses, the web address for one-word names, the lead's own name).
+  - **A judge after each round:** the model names a candidate from the evidence only, and also reports what it learned
+    (the real company name, its location, a better next search, a VP instead of the boss). That unlocks better moves
+    for the next round. Up to 4 rounds per company, about 2 minutes at most.
+  - **Code decides what counts:** the name must appear word for word in the evidence, be a person (not a title or
+    company), hold the top role, and be confident enough; a name found only on a data site (RocketReach, Craft…)
+    needs a higher bar. Outcome per company: **Verified**, **Likely** (a real candidate that narrowly failed a check;
+    confirm ✓ or reject ✕ it in the table) or **Not found** with the reason and how many pages and searches were tried.
+  - **Search engines:** each query goes to one engine at a time (Bing, Yahoo, DuckDuckGo, Brave, Google, Qwant),
+    chosen by which have been returning results, paced, and rested for 10 minutes when they block; an empty answer
+    is retried once on another engine.
+  Every lead comes back in the original order with exact totals. ↗ next to a name opens the source and shows the
+  quote. The CSV includes status, likely candidate, source and reason. Personal emails (gmail etc.) are Not found:
+  there is no company to research.
 - **Earlier leads are remembered:** before a new list runs, executives already verified in any earlier chat (in this
   browser) are passed to the model for matching email domains, so it reuses them instead of searching again. The
   progress line says e.g. "reused 37 from earlier". Free-mail domains such as gmail.com are skipped.

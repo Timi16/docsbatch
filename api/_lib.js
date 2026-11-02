@@ -228,15 +228,20 @@ const trimResult = (x) => ({
 });
 
 // One query to your SearXNG server. The X-Search-Key header is what your reverse proxy checks.
-async function searxngSearch(query, limit = 5) {
+// With `engines` (e.g. 'bing'), only that engine is asked; `unresponsive` lists engines that refused or failed.
+async function searxngSearch(query, limit = 5, { engines } = {}) {
   const params = new URLSearchParams({ q: String(query).slice(0, 300), format: 'json', language: 'en', safesearch: '0' });
+  if (engines) params.set('engines', engines);
   const r = await fetch(`${searxngUrl()}/search?${params}`, {
     headers: { Accept: 'application/json', 'X-Search-Key': process.env.SEARXNG_KEY || '' },
     signal: AbortSignal.timeout(15000),
   });
   if (!r.ok) return { error: `Search server answered ${r.status}` };
   const data = await r.json();
-  return { results: (data.results || []).filter((x) => /^https?:\/\//.test(x.url || '')).slice(0, limit).map(trimResult) };
+  return {
+    results: (data.results || []).filter((x) => /^https?:\/\//.test(x.url || '')).slice(0, limit).map(trimResult),
+    unresponsive: (data.unresponsive_engines || []).map((e) => (Array.isArray(e) ? e[0] : e)),
+  };
 }
 
 // Web search goes only to your SearXNG server. A failed or empty search goes back to the model as such
