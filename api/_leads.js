@@ -73,16 +73,25 @@ function structuredPeople(html) {
   return [...new Set(out)];
 }
 
+// A usable company name from a footer or page title: without "Copyright © 2026 -", "All rights reserved" or a
+// tagline after a dash ("Acme Co - Environmental Consultants in Sacramento"). Null if nothing name-like is left.
+function cleanCompany(s) {
+  let t = squash(decode(String(s || ''))).replace(/\.?\s*all rights reserved.*$/i, '');
+  t = t.replace(/^(?:copyright|©|\(c\)|\d{4}(?:\s*[-–]\s*\d{2,4})?|[-–|,.:\s])+/i, '');
+  t = squash(t.split(/\s[|–—-]\s|\|/)[0]).replace(/[.,\s]+$/, '');
+  return t.length >= 3 && t.split(' ').length <= 6 && /\p{L}/u.test(t) ? t.slice(0, 60) : null;
+}
+
 function companyNameFrom(html, domain) {
   const og = html.match(/<meta[^>]+property=["']og:site_name["'][^>]*content=["']([^"']+)["']/i)
     || html.match(/<meta[^>]+content=["']([^"']+)["'][^>]*property=["']og:site_name["']/i);
-  if (og) return squash(decode(og[1])).slice(0, 80);
+  if (og && cleanCompany(og[1])) return cleanCompany(og[1]);
   const title = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
   if (title) {
     const pieces = squash(decode(title[1])).split(/\s[|–—:-]\s|\s\|\s|\|/).map(squash).filter((p) => p.length > 1);
     const stem = domain.split('.')[0].replace(/[^a-z0-9]/gi, '').toLowerCase();
     const match = pieces.find((p) => p.toLowerCase().replace(/[^a-z0-9]/g, '').includes(stem.slice(0, 5)));
-    if (match || pieces[0]) return (match || pieces[0]).slice(0, 80);
+    if (match || pieces[0]) return cleanCompany(match || pieces[0]);
   }
   return null;
 }
@@ -193,11 +202,27 @@ async function pacedSearch(query) {
   }
 }
 
+// Search results that never mention the company are dropped: a blocked engine answers with unrelated pages,
+// e.g. a Swedish betting site for "Trio Supply Chain Solutions CEO". A result counts when it has the web address
+// or the company's name as a phrase (without endings like "Inc" or "Solutions": "trio supply chain").
+const NAME_ENDING = /^(inc|llc|ltd|llp|plc|corp|corporation|co|company|group|solutions|services|holdings|international|the)$/;
+function aboutCompany(st, x) {
+  const hay = fold(`${x.title} ${x.content} ${x.url}`);
+  const stem = st.domain.split('.')[0].toLowerCase().replace(/[^a-z0-9]/g, '');
+  if (stem.length >= 4 && hay.replace(/\s/g, '').includes(stem)) return true;
+  return [st.company, st.legal].filter(Boolean).some((name) => {
+    const words = fold(name).split(' ');
+    while (words.length > 1 && NAME_ENDING.test(words[words.length - 1])) words.pop();
+    const core = words.join(' ');
+    return (words.length > 1 || core.length >= 5) && ` ${hay} `.includes(` ${core} `);
+  });
+}
+
 // One query, no automatic re-try (every extra search adds to the load that gets the server blocked).
 // With `google`, it is a paid Serper search, counted separately and labelled in the progress trail.
 async function moveSearch(st, query, emit, google = false) {
   (google ? st.triedGoogle : st.tried).add(query.toLowerCase());
-  const results = google ? ((await serperSearch(query, 8).catch(() => ({}))).results || []) : await pacedSearch(query);
+  const results = (google ? ((await serperSearch(query, 8).catch(() => ({}))).results || []) : await pacedSearch(query)).filter((x) => aboutCompany(st, x));
   if (google) st.google++; else st.searches++;
   emit({ type: 'search', queries: [query], urls: results.map((x) => x.url).slice(0, 5), ...(google ? { engine: 'google' } : {}) });
   if (results.length) addEvidence(st, `${google ? 'GOOGLE' : 'SEARCH'} "${query}"`, results.map((x) => `- ${x.title} — ${x.content} (${x.url})`).join('\n'));
@@ -210,7 +235,7 @@ function addPage(st, page) {
   const text = htmlToText(page.html);
   if (!st.legal) {
     const c = text.match(/(?:©|copyright)\s*(?:\d{4}\s*[-–]?\s*\d{0,4}\s*)?([^\n|]{3,80})/i);
-    if (c) st.legal = squash(c[1]).replace(/\.?\s*all rights reserved.*$/i, '').slice(0, 80) || null;
+    if (c) st.legal = cleanCompany(c[1]);
   }
   const lines = roleLines(text, 1800);
   if (people.length || lines) addEvidence(st, `WEBSITE ${page.url}`, `${people.map((x) => `Structured data — ${x}`).join('\n')}${people.length ? '\n' : ''}${lines}`, true);
@@ -345,9 +370,30 @@ async function judge(st, model, usage, contacts) {
 const BUSINESS_WORD = /\b(inc|llc|ltd|llp|plc|corp|corporation|company|co|group|systems|solutions|services|consulting|technologies|technology|partners|holdings|industries|international|global|enterprises|aerospace|labs|software|agency|studio|foundation|association|club|university|bank|team|staff|office)\b/i;
 const host = (u) => { try { return new URL(u).hostname.replace(/^www\./, ''); } catch { return ''; } };
 
-// verified: a person, word for word in the evidence, the top role, confident enough (a stricter bar when the
-// only source is a third-party data site). likely: a real candidate that narrowly failed. Otherwise a reason.
-function accept(pick, evidence, company = '', domain = '') {
+// Data sites that guess titles from scraped profiles; a name found only there needs a higher bar.
+const DATA_SITE = /(rocketreach|zoominfo|apollo\.io|signalhire|contactout|leadiq|lusha|craft\.co|cbinsights|owler|datanyze|seamless\.ai|dnb\.com|buzzfile|bizapedia)/i;
+
+// Where the name appears in the evidence: on the company's own website, and on how many different sites.
+function proofFor(st, name) {
+  const key = fold(name);
+  const hosts = new Set();
+  let onSite = false;
+  if (!key) return { onSite, hosts };
+  for (const e of st.evidence) {
+    if (e.site) { if (fold(e.text).includes(key)) { onSite = true; hosts.add(st.domain); } continue; }
+    for (const line of e.text.split('\n')) {
+      const m = line.match(/\((https?:\/\/[^)\s]+)\)\s*$/);
+      if (m && fold(line).includes(key)) hosts.add(host(m[1]));
+    }
+  }
+  return { onSite, hosts };
+}
+
+// verified: a person, word for word in the evidence, the top role, confident enough. The bar: 0.6 when the
+// company's own site names them or two different sites agree; 0.7 for one reliable source (LinkedIn, a press
+// release); 0.75 when the only source is a data site. likely: a real candidate that narrowly failed.
+// proofOf(name) (optional) returns proofFor() for the name.
+function accept(pick, evidence, company = '', domain = '', proofOf = null) {
   if (!pick || !pick.name) return { ok: false, code: 'none', reason: 'No current top executive named in the evidence found' };
   const name = squash(pick.name).replace(/^(mr|mrs|ms|miss|dr|prof)\.?\s+/i, '');
   const words = name.split(' ');
@@ -356,8 +402,9 @@ function accept(pick, evidence, company = '', domain = '') {
   if (!fold(evidence).includes(fold(name))) return { ok: false, code: 'not_in_evidence', reason: `"${name}" is not in the evidence, so it was not trusted` };
   const tidy = name === name.toLowerCase() ? name.replace(/\b\p{L}/gu, (c) => c.toUpperCase()) : name;
   if (pick.is_top_executive === false) return { ok: false, code: 'not_top', name: tidy, reason: `Only found ${tidy}${pick.title ? ` (${squash(pick.title)})` : ''}, not the top executive` };
-  const official = domain && host(pick.evidence_url || '').endsWith(domain);
-  const bar = official ? 0.6 : 0.75;
+  const proof = proofOf ? proofOf(name) : { onSite: false, hosts: new Set() };
+  const official = (domain && host(pick.evidence_url || '').endsWith(domain)) || proof.onSite;
+  const bar = official || proof.hosts.size >= 2 ? 0.6 : DATA_SITE.test(host(pick.evidence_url || '')) ? 0.75 : 0.7;
   if (!(pick.confidence >= bar)) return { ok: false, code: 'weak', name: tidy, likely: pick.confidence >= 0.45, reason: `Not certain enough (${tidy}${official ? '' : ', only a third-party source'})` };
   return { ok: true, name: tidy };
 }
@@ -402,7 +449,7 @@ async function researchDomain(domain, model, emit, usage, contacts = [], { siteO
     if (st.evidence.length === before && st.judges) continue; // nothing new to judge
     const judged = await judge(st, model, usage, contacts);
     if (!judged) continue;
-    last = accept(judged.pick, judged.evidence, st.company, domain);
+    last = accept(judged.pick, judged.evidence, st.company, domain, (n) => proofFor(st, n));
     if (last.ok) {
       const p = judged.pick;
       return { domain, company: st.company, status: 'verified', name: last.name, title: squash(p.title).slice(0, 80) || null, url: p.evidence_url || null, quote: squash(p.evidence_quote).slice(0, 240) || null, searches: st.searches, google: st.google, pages: st.pages, rounds: st.judges };
