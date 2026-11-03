@@ -24,7 +24,7 @@ const squash = (s) => String(s || '').replace(/\s+/g, ' ').trim();
 // For matching names against evidence: case, accents, punctuation and spacing do not matter.
 const fold = (s) => squash(String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^\p{L}\p{N}\s]/gu, ' ')).toLowerCase();
 
-async function fetchPage(url, ms = 8000, maxBytes = 1500000) {
+async function fetchPage(url, ms = 6000, maxBytes = 1500000) {
   try {
     const r = await fetch(url, { headers: { 'User-Agent': UA, Accept: 'text/html,application/xhtml+xml' }, redirect: 'follow', signal: AbortSignal.timeout(ms) });
     if (!r.ok || !/html/i.test(r.headers.get('content-type') || '')) return null;
@@ -125,20 +125,19 @@ function roleLines(text, limit) {
 // ---- research moves --------------------------------------------------------------------------
 
 // The home page: company name, footer legal name, links to About / Team pages, and leadership lines.
+// The bare and www addresses are tried at once; plain http only if neither answers.
 async function moveHome(st, emit) {
-  for (const url of [`https://${st.domain}`, `https://www.${st.domain}`, `http://${st.domain}`]) {
-    const home = await fetchPage(url);
-    if (!home) continue;
-    st.reachable = true;
-    st.pages++;
-    emit({ type: 'open', url: home.url });
-    const fromSite = companyNameFrom(home.html, st.domain);
-    if (fromSite) { st.company = fromSite; st.nameFromSite = true; }
-    st.links = candidateLinks(home.html, home.url, st.domain);
-    st.base = new URL(home.url).origin;
-    addPage(st, home);
-    return;
-  }
+  const both = await Promise.all([`https://${st.domain}`, `https://www.${st.domain}`].map((u) => fetchPage(u)));
+  const home = both.find(Boolean) || await fetchPage(`http://${st.domain}`);
+  if (!home) return;
+  st.reachable = true;
+  st.pages++;
+  emit({ type: 'open', url: home.url });
+  const fromSite = companyNameFrom(home.html, st.domain);
+  if (fromSite) { st.company = fromSite; st.nameFromSite = true; }
+  st.links = candidateLinks(home.html, home.url, st.domain);
+  st.base = new URL(home.url).origin;
+  addPage(st, home);
 }
 
 // Reads pages not read yet, in parallel.
@@ -149,21 +148,27 @@ async function readPages(st, urls, emit) {
   for (const p of pages) if (p) { st.pages++; emit({ type: 'open', url: p.url }); addPage(st, p); }
 }
 
-// Pages the home page did not link to: common addresses tried directly, and leadership pages from the sitemap.
-async function moveDeepSite(st, emit) {
-  if (!st.reachable) return;
-  const base = st.base || `https://${st.domain}`;
-  const fromSitemap = [];
-  for (const path of ['/sitemap.xml', '/sitemap_index.xml']) {
-    const r = await fetch(base + path, { headers: { 'User-Agent': UA }, signal: AbortSignal.timeout(6000) }).catch(() => null);
-    if (!r || !r.ok) continue;
+// Leadership-looking pages listed in the sitemap, best first (both usual sitemap addresses are asked at once).
+async function sitemapLinks(base) {
+  const lists = await Promise.all(['/sitemap.xml', '/sitemap_index.xml'].map(async (path) => {
+    const r = await fetch(base + path, { headers: { 'User-Agent': UA }, signal: AbortSignal.timeout(5000) }).catch(() => null);
+    if (!r || !r.ok) return [];
     const xml = (await r.text().catch(() => '')).slice(0, 400000);
-    for (const m of xml.matchAll(/<loc>\s*([^<\s]+)\s*<\/loc>/gi)) if (PAGE_HINT.test(new URL(m[1], base).pathname)) fromSitemap.push(m[1]);
-    if (fromSitemap.length) break;
-  }
+    const out = [];
+    for (const m of xml.matchAll(/<loc>\s*([^<\s]+)\s*<\/loc>/gi)) { try { if (PAGE_HINT.test(new URL(m[1], base).pathname)) out.push(m[1]); } catch {} }
+    return out;
+  }));
   const ranked = (u) => { const i = PAGE_RANK.findIndex((w) => u.toLowerCase().includes(w)); return i < 0 ? 99 : i; };
-  const urls = [...st.links.slice(0, 8), ...fromSitemap.sort((a, b) => ranked(a) - ranked(b)), ...COMMON_PATHS.map((p) => base + p)];
-  await readPages(st, urls, emit);
+  return (lists.find((l) => l.length) || []).sort((a, b) => ranked(a) - ranked(b));
+}
+
+// The whole website in two parallel steps: the home page, then its best linked pages together with the
+// sitemap, then the next pages (more links, sitemap pages, common addresses like /about-us).
+async function moveSite(st, emit) {
+  await moveHome(st, emit);
+  if (!st.reachable) return;
+  const [, fromSitemap] = await Promise.all([readPages(st, st.links.slice(0, 4), emit), sitemapLinks(st.base)]);
+  await readPages(st, [...st.links.slice(4, 8), ...fromSitemap, ...COMMON_PATHS.map((p) => st.base + p)], emit);
 }
 
 // ---- searching ------------------------------------------------------------------------------------
@@ -305,7 +310,7 @@ async function judge(st, model, usage, contacts) {
   const evidence = evidenceText(st);
   if (!evidence) return null;
   st.judges++;
-  const data = await openai('/responses', {
+  const ask = () => openai('/responses', {
     method: 'POST',
     json: {
       model,
@@ -314,6 +319,9 @@ async function judge(st, model, usage, contacts) {
       text: { format: { type: 'json_schema', name: 'executive', schema: SCHEMA, strict: true } },
     },
   });
+  // A rate limit or a hiccup at OpenAI gets one more try before the company counts as failed.
+  let data;
+  try { data = await ask(); } catch (e) { if (![429, 502].includes(e.status)) throw e; await sleep(2500); data = await ask(); }
   if (data.usage) {
     usage.input += data.usage.input_tokens || 0;
     usage.output += data.usage.output_tokens || 0;
@@ -372,7 +380,8 @@ const FREE_MS = 90000;
 const MAX_MS = 120000;
 const googlePerCompany = () => Math.max(0, Math.min(4, Number(process.env.SERPER_PER_COMPANY ?? 2) || 0));
 
-async function researchDomain(domain, model, emit, usage, contacts = []) {
+// siteOnly: just the website round (the page's first pass over a whole list); searching comes in a later call.
+async function researchDomain(domain, model, emit, usage, contacts = [], { siteOnly = false } = {}) {
   const st = {
     domain, company: stemName(domain), nameFromSite: false, legal: null, location: null, base: null, links: [], read: new Set(),
     evidence: [], labels: new Set(), tried: new Set(), triedGoogle: new Set(), suggested: [], sawDeputy: false,
@@ -382,10 +391,10 @@ async function researchDomain(domain, model, emit, usage, contacts = []) {
   const canSearch = searchConfigured();
   let best = null;
   let last = { ok: false, code: 'none', reason: 'Nothing found' };
-  for (const round of ROUNDS) {
+  for (const round of siteOnly ? ROUNDS.slice(0, 1) : ROUNDS) {
     if (Date.now() - started > (round.google ? MAX_MS : FREE_MS)) continue;
     const before = st.evidence.length;
-    if (round.site) { await moveHome(st, emit); await readPages(st, st.links.slice(0, 4), emit); await moveDeepSite(st, emit); }
+    if (round.site) await moveSite(st, emit);
     if (round.google) {
       if (!googlePerCompany() || !(await serperAllowed())) break;
       for (const q of nextQueries(st, contacts, googlePerCompany(), st.triedGoogle)) await moveSearch(st, q, emit, true);

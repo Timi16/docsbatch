@@ -47,7 +47,13 @@ local SearXNG, start it with Docker (see `searxng/README.md`) and set `SEARXNG_U
   **Copy for Sheets** for everything the filter shows. A later REVIEW pass is merged into the same rows.
 - **Lead research engine:** when an attached file is a lead list (lines with email addresses) and the message asks
   for each company's top executive / CEO / owner (with Web search on), the app runs `/api/leads` instead of the
-  general AI path. Per unique company domain it runs a budgeted best-first search:
+  general AI path. It works in two passes over the list:
+  - **Website pass:** every company's website is read and judged, about 48 companies at once (3 requests of 16).
+    No searching happens here, so it cannot get the search server blocked; most companies are verified in minutes.
+  - **Search pass:** only the companies still open are researched in full (website again, then searches), one batch
+    of 40 at a time with 8 companies at once, because searches start at most one per second.
+
+  Per company the full research is a budgeted best-first search:
   - **Moves**, most promising first: the company's home page and About / Team / Leadership pages; then pages the home
     page does not link to (its sitemap and common addresses like `/about-us`, `/leadership`); then searches on your
     SearXNG, worded for the kind of organisation (Commodore for yacht clubs, Executive Director for nonprofits, CEO /

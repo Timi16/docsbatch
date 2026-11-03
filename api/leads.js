@@ -2,9 +2,11 @@
 const { streamRoute, httpError, cleanModel } = require('./_lib');
 const { researchDomain, engineHealth } = require('./_leads');
 
-// Companies researched at once. Searches inside one company run one after another, so this is also the most
-// searches your SearXNG server gets at the same time.
-const WORKERS = 3;
+// Companies researched at once. Reading websites and judging run in parallel; searches still start one
+// second apart (paced in _leads.js), so more workers do not mean a burst on your SearXNG server.
+// The website pass (pass: 'site') does no searching at all, so it runs more companies at once.
+const WORKERS = 8;
+const SITE_WORKERS = 16;
 // The function may run 300 s (vercel.json). New companies are only started in the first 170 s; any not
 // started come back as `remaining` and the page sends them again.
 const START_MS = 170000;
@@ -19,19 +21,20 @@ module.exports = streamRoute(async (req, emit) => {
   if (!domains.length) throw httpError(400, 'No company domains to research.');
   // First names of the leads at each company (optional), for the "the lead is the owner" search.
   const contacts = b.contacts && typeof b.contacts === 'object' ? b.contacts : {};
+  const siteOnly = b.pass === 'site';
   const namesFor = (d) => (Array.isArray(contacts[d]) ? contacts[d] : []).map((n) => String(n || '').trim().slice(0, 40)).filter(Boolean).slice(0, 3);
 
   const started = Date.now();
   const usage = { input: 0, output: 0, searches: 0, google: 0, pages: 0 };
   const results = [];
   let next = 0;
-  await Promise.all(Array.from({ length: Math.min(WORKERS, domains.length) }, async () => {
+  await Promise.all(Array.from({ length: Math.min(siteOnly ? SITE_WORKERS : WORKERS, domains.length) }, async () => {
     while (next < domains.length && Date.now() - started < START_MS) {
       const domain = domains[next++];
       emit({ type: 'company', domain });
       let result;
       try {
-        result = await researchDomain(domain, model, (ev) => emit({ ...ev, domain }), usage, namesFor(domain));
+        result = await researchDomain(domain, model, (ev) => emit({ ...ev, domain }), usage, namesFor(domain), { siteOnly });
       } catch (e) {
         // Only problems that stop every company end the batch: no OpenAI credit (402) or a key/permission
         // problem (401/403). Anything else affects just this company, which the page retries later.

@@ -1038,7 +1038,7 @@
   // Lead lists ("Name email ...") asking for each company's top executive go to /api/leads, which researches
   // each company once (its website, then SearXNG) and only accepts names found word for word in the evidence.
   const LEAD_TASK = /\b(top\s+exec|executive|ceo|chief exec|owner|founder|president|decision[- ]?maker|leadership)\b/i;
-  const LEAD_BATCH = 24;
+  const LEAD_BATCH = 40;
   function parseLeads(text) {
     const leads = [];
     for (const raw of String(text || '').split('\n')) {
@@ -1096,63 +1096,88 @@
     let reused = 0;
     for (const d of domains) if (!r.found[d] && known.has(d)) { r.found[d] = { status: 'verified', name: known.get(d).exec, via: 'earlier' }; reused++; }
     if (reused) step({ k: 'known', n: reused });
+    // Two passes. First every company's website, several batches at once: no searching, so nothing can get the
+    // search server blocked, and most companies are verified within minutes. Then only the rest are searched,
+    // one batch at a time, because searches are paced.
+    r.siteDone = r.siteDone || {}; // website pass finished (kept, so Continue goes straight to searching)
     const fails = {};
-    let todo = domains.filter((d) => !r.found[d]);
+    let searching = false;
     const progress = () => {
-      const done = domains.filter((d) => r.found[d]).length;
       const ok = domains.filter((d) => r.found[d] && r.found[d].status === 'verified').length;
       const likely = domains.filter((d) => r.found[d] && r.found[d].status === 'likely').length;
-      r.phase = `Researched ${done} of ${domains.length} companies · ${ok} verified${likely ? ` · ${likely} likely` : ''}`;
+      const counts = ` · ${ok} verified${likely ? ` · ${likely} likely` : ''}`;
+      r.phase = searching
+        ? `Searching for the rest: ${domains.filter((d) => r.found[d]).length} of ${domains.length} companies done${counts}`
+        : `Reading websites: ${domains.filter((d) => r.found[d] || r.siteDone[d]).length} of ${domains.length} companies${counts}`;
       r.text = buildLeadText(r, false);
     };
+    // One request for a batch, retried until it answers. Companies it did not get to are picked up by the
+    // next round of the pass.
+    async function send(batch, pass) {
+      for (let attempt = 1; ; attempt++) {
+        if (r.state !== 'working') return;
+        if (state.cancelRequested) { r.state = 'stopped'; return; }
+        let result;
+        try {
+          const contacts = Object.fromEntries(batch.map((d) => [d, [...new Set(r.leads.filter((l) => leadDomain(l.e) === d).map((l) => l.n).filter(Boolean))].slice(0, 3)]));
+          result = await streamApi('leads', { domains: batch, contacts, pass }, (ev) => {
+            if (ev.type === 'open') step({ k: 'open', url: ev.url });
+            else if (ev.type === 'search') { step({ k: 'search', q: ev.queries, urls: (ev.urls || []).slice(0, 5), g: ev.engine === 'google' }); r.phase = `Searching ${ev.engine === 'google' ? 'Google ' : ''}“${ev.queries[0]}”`; }
+            else if (ev.type === 'domain') {
+              if (ev.status === 'error') return;
+              if (pass === 'site' && ev.status !== 'verified') r.siteDone[ev.domain] = true;
+              else {
+                r.found[ev.domain] = ev.status === 'verified' || ev.status === 'likely'
+                  ? { status: ev.status, name: ev.name, title: ev.title, url: ev.url, quote: ev.quote, reason: ev.reason }
+                  : { status: 'review', reason: ev.reason };
+              }
+              progress();
+            }
+            r.retrying = false;
+            paintSoon(chat, msg, i);
+          });
+        } catch (e) {
+          if (state.cancelRequested) { r.state = 'stopped'; return; }
+          if (e.status === 401) throw e;
+          if (e.status >= 400 && e.status < 500 && e.status !== 408 && e.status !== 429) {
+            r.state = 'failed';
+            r.warning = `Stopped before the end: ${e.message}`;
+            return;
+          }
+          r.retrying = true;
+          r.phase = `Retrying (${attempt}) · ${String(e.message || 'no answer').slice(0, 120)}`;
+          paintSoon(chat, msg, i);
+          await pause(retryDelay(attempt));
+          continue;
+        }
+        const remaining = new Set(result.remaining || []);
+        for (const d of batch) {
+          if (r.found[d] || remaining.has(d)) continue;
+          const errored = result.results.some((x) => x.domain === d && x.status === 'error');
+          const answered = result.results.some((x) => x.domain === d);
+          // A company the server skipped (not a valid web address) or whose website pass failed goes on to the
+          // search pass; one that keeps failing in the search pass becomes Review after three tries.
+          if (pass === 'site') r.siteDone[d] = true;
+          else if (!answered) r.found[d] = { status: 'review', reason: 'Not a valid web address' };
+          else if (errored && (fails[d] = (fails[d] || 0) + 1) >= 3) r.found[d] = { status: 'review', reason: 'Research kept failing for this company' };
+        }
+        progress();
+        paintSoon(chat, msg, i);
+        return;
+      }
+    }
+    const SITE_PARALLEL = 3;
+    const chunks = (list) => Array.from({ length: Math.ceil(list.length / LEAD_BATCH) }, (_, k) => list.slice(k * LEAD_BATCH, (k + 1) * LEAD_BATCH));
     progress();
     paintResult(chat, msg, i);
-    let attempt = 0;
-    while (todo.length) {
-      if (state.cancelRequested) { r.state = 'stopped'; break; }
-      const batch = todo.slice(0, LEAD_BATCH);
-      let result = null;
-      try {
-        const contacts = Object.fromEntries(batch.map((d) => [d, [...new Set(r.leads.filter((l) => leadDomain(l.e) === d).map((l) => l.n).filter(Boolean))].slice(0, 3)]));
-        result = await streamApi('leads', { domains: batch, contacts }, (ev) => {
-          if (ev.type === 'open') step({ k: 'open', url: ev.url });
-          else if (ev.type === 'search') { step({ k: 'search', q: ev.queries, urls: (ev.urls || []).slice(0, 5), g: ev.engine === 'google' }); r.phase = `Searching ${ev.engine === 'google' ? 'Google ' : ''}“${ev.queries[0]}”`; }
-          else if (ev.type === 'company') r.phase = `Researching ${ev.domain}`;
-          else if (ev.type === 'domain') {
-            if (ev.status === 'error') return;
-            r.found[ev.domain] = ev.status === 'verified' || ev.status === 'likely'
-              ? { status: ev.status, name: ev.name, title: ev.title, url: ev.url, quote: ev.quote, reason: ev.reason }
-              : { status: 'review', reason: ev.reason };
-            progress();
-          }
-          r.retrying = false;
-          paintSoon(chat, msg, i);
-        });
-        attempt = 0;
-      } catch (e) {
-        if (state.cancelRequested) { r.state = 'stopped'; break; }
-        if (e.status === 401) throw e;
-        if (e.status >= 400 && e.status < 500 && e.status !== 408 && e.status !== 429) {
-          r.state = 'failed';
-          r.warning = `Stopped before the end: ${e.message}`;
-          break;
-        }
-        attempt++;
-        r.retrying = true;
-        r.phase = `Retrying (${attempt}) · ${String(e.message || 'no answer').slice(0, 120)}`;
-        paintSoon(chat, msg, i);
-        await pause(retryDelay(attempt));
-      }
-      // Companies that errored are tried again later; after three failures they become Review.
-      for (const d of batch) {
-        if (r.found[d]) continue;
-        const errored = result && result.results.some((x) => x.domain === d && x.status === 'error');
-        if (errored && (fails[d] = (fails[d] || 0) + 1) >= 3) r.found[d] = { status: 'review', reason: 'Research kept failing for this company' };
-      }
-      todo = todo.filter((d) => !r.found[d]);
-      progress();
-      paintSoon(chat, msg, i);
+    let todo;
+    while (r.state === 'working' && (todo = domains.filter((d) => !r.found[d] && !r.siteDone[d])).length) {
+      await pool(chunks(todo), SITE_PARALLEL, (batch) => send(batch, 'site'));
     }
+    searching = true;
+    progress();
+    while (r.state === 'working' && (todo = domains.filter((d) => !r.found[d])).length) await send(todo.slice(0, LEAD_BATCH), 'full');
+    if (state.cancelRequested && r.state === 'working') r.state = 'stopped';
     r.text = buildLeadText(r, r.state !== 'stopped');
     if (r.state === 'working') r.state = 'done';
     r.t1 = Date.now();
