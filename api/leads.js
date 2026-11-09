@@ -46,13 +46,19 @@ module.exports = streamRoute(async (req, emit) => {
       const domain = domains[next++];
       emit({ type: 'company', domain });
       let result;
+      // Every company answers before the function is stopped at 300 s, even if its research is stuck.
+      const left = Math.max(5000, 285000 - (Date.now() - started));
+      let timer;
+      const outOfTime = new Promise((resolve) => { timer = setTimeout(() => resolve({ domain, status: 'review', reason: 'Ran out of time researching this company' }), left); });
       try {
-        result = await researchDomain(domain, model, (ev) => emit({ ...ev, domain }), usage, namesFor(domain), { siteOnly, stubborn, wikidata: wikidata[domain] || [] });
+        result = await Promise.race([outOfTime, researchDomain(domain, model, (ev) => emit({ ...ev, domain }), usage, namesFor(domain), { siteOnly, stubborn, wikidata: wikidata[domain] || [] })]);
       } catch (e) {
         // Only problems that stop every company end the batch: no OpenAI credit (402) or a key/permission
         // problem (401/403). Anything else affects just this company, which the page retries later.
         if ([401, 402, 403].includes(e.status)) throw e;
         result = { domain, status: 'error', reason: e.message || 'Research failed' };
+      } finally {
+        clearTimeout(timer);
       }
       usage.searches += result.searches || 0;
       usage.google += result.google || 0;

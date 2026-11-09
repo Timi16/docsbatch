@@ -1147,6 +1147,8 @@
             r.warning = `Stopped before the end: ${e.message}`;
             return;
           }
+          // The last pass is a bonus: a batch that keeps failing keeps its earlier answers instead of retrying forever.
+          if (pass === 'stubborn' && attempt >= 2) { for (const d of batch) r.stubbornDone[d] = true; r.retrying = false; return; }
           r.retrying = true;
           r.phase = `Retrying (${attempt}) · ${String(e.message || 'no answer').slice(0, 120)}`;
           paintSoon(chat, msg, i);

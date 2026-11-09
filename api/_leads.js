@@ -572,7 +572,12 @@ async function researchDomain(domain, model, emit, usage, contacts = [], { siteO
     if (round.google) {
       if (!googlePerCompany() || !(await serperAllowed())) break;
       for (const q of nextQueries(st, contacts, googlePerCompany(), st.triedGoogle)) await moveSearch(st, q, emit, true);
-    } else if (canSearch) for (const q of nextQueries(st, contacts, round.searches)) await moveSearch(st, q, emit);
+    } else if (canSearch) {
+      for (const q of nextQueries(st, contacts, round.searches)) {
+        if (Date.now() - started > freeMs) break; // slow searches (an engine pushing back) must not eat the time to answer
+        await moveSearch(st, q, emit);
+      }
+    }
     if (st.evidence.length === before && st.judges) continue; // nothing new to judge
     const judged = await judge(st, model, usage, contacts);
     if (!judged) continue;
