@@ -1096,9 +1096,9 @@
     let reused = 0;
     for (const d of domains) if (!r.found[d] && known.has(d)) { r.found[d] = { status: 'verified', name: known.get(d).exec, via: 'earlier' }; reused++; }
     if (reused) step({ k: 'known', n: reused });
-    // Two passes. First every company's website, several batches at once: no searching, so nothing can get the
-    // search server blocked, and most companies are verified within minutes. Then only the rest are searched,
-    // one batch at a time, because searches are paced.
+    // Two passes. First every company's website, several batches at once: no searching, so nothing can get
+    // blocked, and most companies are verified within minutes. Then the rest get the deep pass (archive, Yahoo,
+    // SearXNG), also several batches at once: each server paces its own searches, and a shared one shares the pace.
     r.siteDone = r.siteDone || {}; // website pass finished (kept, so Continue goes straight to searching)
     const fails = {};
     let searching = false;
@@ -1167,6 +1167,7 @@
       }
     }
     const SITE_PARALLEL = 3;
+    const DEEP_PARALLEL = 3;
     const chunks = (list) => Array.from({ length: Math.ceil(list.length / LEAD_BATCH) }, (_, k) => list.slice(k * LEAD_BATCH, (k + 1) * LEAD_BATCH));
     progress();
     paintResult(chat, msg, i);
@@ -1176,7 +1177,9 @@
     }
     searching = true;
     progress();
-    while (r.state === 'working' && (todo = domains.filter((d) => !r.found[d])).length) await send(todo.slice(0, LEAD_BATCH), 'full');
+    while (r.state === 'working' && (todo = domains.filter((d) => !r.found[d])).length) {
+      await pool(chunks(todo).slice(0, DEEP_PARALLEL), DEEP_PARALLEL, (batch) => send(batch, 'full'));
+    }
     if (state.cancelRequested && r.state === 'working') r.state = 'stopped';
     r.text = buildLeadText(r, r.state !== 'stopped');
     if (r.state === 'working') r.state = 'done';
