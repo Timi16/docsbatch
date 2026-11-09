@@ -47,7 +47,7 @@ local SearXNG, start it with Docker (see `searxng/README.md`) and set `SEARXNG_U
   **Copy for Sheets** for everything the filter shows. A later REVIEW pass is merged into the same rows.
 - **Lead research engine:** when an attached file is a lead list (lines with email addresses) and the message asks
   for each company's top executive / CEO / owner (with Web search on), the app runs `/api/leads` instead of the
-  general AI path. It works in two passes over the list:
+  general AI path. It works in three passes over the list:
   - **Website pass:** every company's website is read and judged, about 48 companies at once (3 requests of 16).
     No searching happens here, so it cannot get the search server blocked; most companies are verified in minutes.
     Free sources that never block servers are used here too:
@@ -60,6 +60,10 @@ local SearXNG, start it with Docker (see `searxng/README.md`) and set `SEARXNG_U
     at once: the website again, then the **Wayback Machine** (team pages nothing links to any more, and old copies
     of sites that are down or block robots; requests spaced 4.5 s apart, since it blocks bursts), then searches
     (at most one per second), then Google if `SERPER_KEY` has credits.
+  - **Stubborn pass:** companies still not verified after the deep pass get one more try with a bigger budget: up
+    to 12 searches and about 4 minutes each (LinkedIn, Bizapedia / OpenCorporates state filings, the leads' own
+    names), 8 companies per request with 4 at a time. A founder, owner, president or executive director named on
+    the company's own site counts, and so does the namesake of a firm ("Gleason" at Gleason Legal).
   - **Searches go to Yahoo first**, read straight from Yahoo's results page by the Vercel function (free). Vercel's
     servers are in the US and change address, which Yahoo tolerates, while a single search server gets blocked.
     Your SearXNG is used when Yahoo finds nothing or pushes back (Yahoo then rests for 5 minutes).

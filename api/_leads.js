@@ -18,9 +18,11 @@ const NONPROFIT = /\b(association|foundation|society|institute|chamber|club|chur
 const PAGE_RANK = ['leadership', 'team', 'about', 'founder', 'management', 'people', 'our-story', 'who-we-are', 'executive', 'board', 'company', 'staff', 'meet', 'officers', 'history', 'owner', 'contact'];
 
 const ENTITIES = { copy: '©', reg: '®', amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ', ndash: '–', mdash: '—', rsquo: '’', lsquo: '‘', rdquo: '”', ldquo: '“', hellip: '…' };
+const ACCENT = { acute: '\u0301', grave: '\u0300', circ: '\u0302', uml: '\u0308', tilde: '\u0303', cedil: '\u0327', ring: '\u030A' };
 const decode = (s) => s
   .replace(/&#x([0-9a-f]+);/gi, (_, h) => String.fromCodePoint(parseInt(h, 16)))
   .replace(/&#(\d+);/g, (_, d) => String.fromCodePoint(Number(d)))
+  .replace(/&([a-z])(acute|grave|circ|uml|tilde|cedil|ring);/gi, (_, l, k) => `${l}${ACCENT[k.toLowerCase()]}`.normalize('NFC'))
   .replace(/&([a-z]+);/gi, (m, n) => ENTITIES[n.toLowerCase()] ?? m);
 const squash = (s) => String(s || '').replace(/\s+/g, ' ').trim();
 // For matching names against evidence: case, accents, punctuation and spacing do not matter.
@@ -370,6 +372,18 @@ function nextQueries(st, contacts, n, tried = st.tried) {
     nonprofit ? `${name} 990 officers` : `${who} linkedin CEO`,
     nonprofit ? `${name} board president` : `${who} managing director`,
     `${who} principal`,
+    // The stubborn pass: profiles, state filings (Bizapedia, OpenCorporates) and the leads themselves.
+    ...(st.stubborn ? [
+      `${who} linkedin owner`,
+      `${st.domain} founder`,
+      `${name} bizapedia`,
+      `${name} opencorporates officers`,
+      ...contacts.filter((c) => /\p{L}{2,}/u.test(c)).slice(0, 2).map((c) => `${c} ${who} linkedin`),
+      st.location ? `${name} ${st.location} president` : `${who} chief executive`,
+      `"${name}" executive director`,
+      `${st.domain} owner`,
+      `${name} leadership team`,
+    ] : []),
   ];
   const out = [];
   for (const q of plan) {
@@ -483,9 +497,12 @@ function accept(pick, evidence, company = '', domain = '', proofOf = null) {
   if (!pick || !pick.name) return { ok: false, code: 'none', reason: 'No current top executive named in the evidence found' };
   const name = squash(pick.name).replace(/^(mr|mrs|ms|miss|dr|prof)\.?\s+/i, '');
   const words = name.split(' ');
-  const looksLikeCompany = BUSINESS_WORD.test(name) || (company && (fold(company).includes(fold(name)) || fold(name).includes(fold(company))));
+  // "Glenn Armentor" at "The Glenn Armentor Law Corporation" is the namesake, a person; only a "name" that
+  // contains the whole company name is the company itself.
+  const looksLikeCompany = BUSINESS_WORD.test(name) || (company && fold(name).includes(fold(company)));
   if (words.length < 2 || words.length > 5 || ROLE.test(name) || /\d/.test(name) || looksLikeCompany) return { ok: false, code: 'not_person', reason: `"${name}" does not look like a person's full name` };
-  if (!fold(evidence).includes(fold(name))) return { ok: false, code: 'not_in_evidence', reason: `"${name}" is not in the evidence, so it was not trusted` };
+  const plain = fold(name).replace(/\s+(jr|sr|ii|iii|iv)$/, '');
+  if (!fold(evidence).includes(fold(name)) && !fold(evidence).includes(plain)) return { ok: false, code: 'not_in_evidence', reason: `"${name}" is not in the evidence, so it was not trusted` };
   const tidy = name === name.toLowerCase() ? name.replace(/\b\p{L}/gu, (c) => c.toUpperCase()) : name;
   if (pick.is_top_executive === false) return { ok: false, code: 'not_top', name: tidy, reason: `Only found ${tidy}${pick.title ? ` (${squash(pick.title)})` : ''}, not the top executive` };
   const proof = proofOf ? proofOf(name) : { onSite: false, hosts: new Set() };
@@ -503,6 +520,16 @@ function accept(pick, evidence, company = '', domain = '', proofOf = null) {
 // search. Searches are capped at 4 per company, because heavy searching is what gets a search server blocked.
 // The last round is Google (paid): only for companies still unsolved, only while Serper has credits left, at
 // most SERPER_PER_COMPANY (default 2) searches. The free rounds stop at FREE_MS so it always has time left.
+// The stubborn pass (companies every earlier pass failed): the same moves, then up to 12 searches.
+const STUBBORN_ROUNDS = [
+  { site: true, searches: 0 },
+  { archive: true, searches: 0 },
+  { searches: 3 },
+  { searches: 3 },
+  { searches: 3 },
+  { searches: 3 },
+  { google: true },
+];
 const ROUNDS = [
   { site: true, searches: 0 },
   { archive: true, searches: 0 },
@@ -517,12 +544,14 @@ const googlePerCompany = () => Math.max(0, Math.min(4, Number(process.env.SERPER
 
 // siteOnly: just the website round (the page's first pass over a whole list); the archive and searches come
 // in a later call, which runs one batch at a time. wikidata: facts already looked up for this domain (_sources.wikidataLookup).
-async function researchDomain(domain, model, emit, usage, contacts = [], { siteOnly = false, wikidata = [] } = {}) {
+async function researchDomain(domain, model, emit, usage, contacts = [], { siteOnly = false, stubborn = false, wikidata = [] } = {}) {
   const st = {
     domain, company: stemName(domain), nameFromSite: false, legal: null, location: null, base: null, links: [], more: [], read: new Set(),
     evidence: [], labels: new Set(), tried: new Set(), triedGoogle: new Set(), suggested: [], sawDeputy: false,
-    reachable: false, searches: 0, google: 0, pages: 0, judges: 0,
+    reachable: false, searches: 0, google: 0, pages: 0, judges: 0, stubborn,
   };
+  const freeMs = stubborn ? 235000 : FREE_MS;
+  const maxMs = stubborn ? 250000 : MAX_MS;
   const started = Date.now();
   const canSearch = true; // Yahoo needs no setup; SearXNG is the fallback when configured
   let best = null;
@@ -531,8 +560,8 @@ async function researchDomain(domain, model, emit, usage, contacts = [], { siteO
     emit({ type: 'open', url: wikidata[0].url });
     addEvidence(st, 'WIKIDATA', wikidata.map((w) => `- ${w.org} (official website ${domain}) — ${w.role}: ${w.person}${w.start ? `, since ${w.start}` : ''} (${w.url})`).join('\n'));
   }
-  for (const round of siteOnly ? ROUNDS.slice(0, 1) : ROUNDS) {
-    if (Date.now() - started > (round.google ? MAX_MS : FREE_MS)) continue;
+  for (const round of siteOnly ? ROUNDS.slice(0, 1) : stubborn ? STUBBORN_ROUNDS : ROUNDS) {
+    if (Date.now() - started > (round.google ? maxMs : freeMs)) continue;
     const before = st.evidence.length;
     if (round.site) {
       await moveSite(st, emit);
@@ -553,7 +582,22 @@ async function researchDomain(domain, model, emit, usage, contacts = [], { siteO
     }
     // A founder, owner or president the judge did not rank as the top (it may suspect an unnamed CEO) is still
     // the best lead to the company: shown as Likely for a person to confirm.
-    const leaderTitle = /\b(founder|co-?founder|owner|president|managing (director|partner)|principal)\b/i.test(judged.pick.title || '') && !/\bvice\b/i.test(judged.pick.title || '');
+    const leaderTitle = /\b(founder|co-?founder|owner|president|managing (director|partner)|principal|executive director)\b/i.test(judged.pick.title || '') && !/\bvice\b/i.test(judged.pick.title || '');
+    // The company's own site names them and they are its founder / owner / president / executive director, or
+    // the firm carries their surname (a law firm, a realtor, a studio): that is who runs it.
+    if (last.code === 'not_top' && last.name) {
+      const p = judged.pick;
+      const title = p.title || '';
+      const onSite = proofFor(st, last.name).onSite || host(p.evidence_url || '').endsWith(domain);
+      const surname = fold(last.name).replace(/\s+(jr|sr|ii|iii|iv)$/, '').split(' ').pop();
+      const firm = fold(`${st.company} ${st.legal || ''}`).split(' ');
+      const namesake = surname.length >= 3 && (firm.includes(surname) || (surname.length >= 5 && domain.split('.')[0].includes(surname)));
+      const runs = /\b(founder|owner|president|chief executive|ceo|executive director|managing (partner|member|director)|principal|proprietor)\b/i.test(title)
+        && !/\b(vice|co-?founder|assistant|deputy|associate|board)\b/i.test(title);
+      if (onSite && (runs || namesake)) {
+        return { domain, company: st.company, status: 'verified', name: last.name, title: squash(title).slice(0, 80) || null, url: p.evidence_url || null, quote: squash(p.evidence_quote).slice(0, 240) || null, note: namesake && !runs ? 'namesake of the firm' : 'named on the company site', searches: st.searches, google: st.google, pages: st.pages, rounds: st.judges };
+      }
+    }
     if (last.likely || (last.code === 'weak' && last.name) || (last.code === 'not_top' && last.name && leaderTitle)) best = { ...judged.pick, name: last.name, reason: last.reason };
   }
   const tried = `tried ${st.pages} page${st.pages === 1 ? '' : 's'} and ${st.searches} search${st.searches === 1 ? '' : 'es'}${st.google ? ` + ${st.google} Google` : ''}`;

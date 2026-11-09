@@ -1100,6 +1100,7 @@
     // blocked, and most companies are verified within minutes. Then the rest get the deep pass (archive, Yahoo,
     // SearXNG), also several batches at once: each server paces its own searches, and a shared one shares the pace.
     r.siteDone = r.siteDone || {}; // website pass finished (kept, so Continue goes straight to searching)
+    r.stubbornDone = r.stubbornDone || {}; // last, stubborn pass finished for this company
     const fails = {};
     let searching = false;
     const progress = () => {
@@ -1126,7 +1127,9 @@
             else if (ev.type === 'domain') {
               if (ev.status === 'error') return;
               if (pass === 'site' && ev.status !== 'verified') r.siteDone[ev.domain] = true;
+              else if (pass === 'stubborn' && ev.status === 'review' && r.found[ev.domain]) r.stubbornDone[ev.domain] = true; // keep the earlier answer
               else {
+                if (pass === 'stubborn') r.stubbornDone[ev.domain] = true;
                 r.found[ev.domain] = ev.status === 'verified' || ev.status === 'likely'
                   ? { status: ev.status, name: ev.name, title: ev.title, url: ev.url, quote: ev.quote, reason: ev.reason }
                   : { status: 'review', reason: ev.reason };
@@ -1152,6 +1155,12 @@
         }
         const remaining = new Set(result.remaining || []);
         for (const d of batch) {
+          if (pass === 'stubborn') {
+            if (r.stubbornDone[d] || remaining.has(d)) continue;
+            const errored = result.results.some((x) => x.domain === d && x.status === 'error');
+            if (!errored || (fails[`s:${d}`] = (fails[`s:${d}`] || 0) + 1) >= 3) r.stubbornDone[d] = true;
+            continue;
+          }
           if (r.found[d] || remaining.has(d)) continue;
           const errored = result.results.some((x) => x.domain === d && x.status === 'error');
           const answered = result.results.some((x) => x.domain === d);
@@ -1179,6 +1188,11 @@
     progress();
     while (r.state === 'working' && (todo = domains.filter((d) => !r.found[d])).length) {
       await pool(chunks(todo).slice(0, DEEP_PARALLEL), DEEP_PARALLEL, (batch) => send(batch, 'full'));
+    }
+    // Last, the stubborn pass: every company still not verified gets up to 12 more searches, 4 at a time per request.
+    while (r.state === 'working' && (todo = domains.filter((d) => r.found[d] && r.found[d].status !== 'verified' && r.found[d].via !== 'earlier' && !r.stubbornDone[d])).length) {
+      const small = Array.from({ length: Math.ceil(todo.length / 8) }, (_, k) => todo.slice(k * 8, (k + 1) * 8));
+      await pool(small.slice(0, DEEP_PARALLEL), DEEP_PARALLEL, (batch) => send(batch, 'stubborn'));
     }
     if (state.cancelRequested && r.state === 'working') r.state = 'stopped';
     r.text = buildLeadText(r, r.state !== 'stopped');

@@ -13,6 +13,10 @@ const SITE_WORKERS = 16;
 // come back as `remaining` and the page sends them again.
 const SITE_START_MS = 170000;
 const FULL_START_MS = 120000;
+// The stubborn pass (pass: 'stubborn', companies every other pass failed) spends up to 250 s on each, so
+// fewer at once and only started in the first 40 s.
+const STUBBORN_WORKERS = 4;
+const STUBBORN_START_MS = 40000;
 const DOMAIN = /^(?=.{4,253}$)([a-z0-9-]{1,63}\.)+[a-z]{2,63}$/;
 
 // Researches a batch of company domains (from lead emails), streaming each result as it is found.
@@ -25,6 +29,9 @@ module.exports = streamRoute(async (req, emit) => {
   // First names of the leads at each company (optional), for the "the lead is the owner" search.
   const contacts = b.contacts && typeof b.contacts === 'object' ? b.contacts : {};
   const siteOnly = b.pass === 'site';
+  const stubborn = b.pass === 'stubborn';
+  const workers = siteOnly ? SITE_WORKERS : stubborn ? STUBBORN_WORKERS : WORKERS;
+  const startMs = siteOnly ? SITE_START_MS : stubborn ? STUBBORN_START_MS : FULL_START_MS;
   const namesFor = (d) => (Array.isArray(contacts[d]) ? contacts[d] : []).map((n) => String(n || '').trim().slice(0, 40)).filter(Boolean).slice(0, 3);
 
   const started = Date.now();
@@ -34,13 +41,13 @@ module.exports = streamRoute(async (req, emit) => {
   // Wikidata query for the whole batch.
   const wikidata = await wikidataLookup(domains).catch(() => ({}));
   let next = 0;
-  await Promise.all(Array.from({ length: Math.min(siteOnly ? SITE_WORKERS : WORKERS, domains.length) }, async () => {
-    while (next < domains.length && Date.now() - started < (siteOnly ? SITE_START_MS : FULL_START_MS)) {
+  await Promise.all(Array.from({ length: Math.min(workers, domains.length) }, async () => {
+    while (next < domains.length && Date.now() - started < startMs) {
       const domain = domains[next++];
       emit({ type: 'company', domain });
       let result;
       try {
-        result = await researchDomain(domain, model, (ev) => emit({ ...ev, domain }), usage, namesFor(domain), { siteOnly, wikidata: wikidata[domain] || [] });
+        result = await researchDomain(domain, model, (ev) => emit({ ...ev, domain }), usage, namesFor(domain), { siteOnly, stubborn, wikidata: wikidata[domain] || [] });
       } catch (e) {
         // Only problems that stop every company end the batch: no OpenAI credit (402) or a key/permission
         // problem (401/403). Anything else affects just this company, which the page retries later.
