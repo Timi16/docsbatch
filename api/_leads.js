@@ -17,7 +17,7 @@ const COMMON_PATHS = ['/about', '/about-us', '/team', '/our-team', '/leadership'
 const NONPROFIT = /\b(association|foundation|society|institute|chamber|club|church|school|academy|alliance|council|federation|coalition|charity|ministries|union|league|museum|orchestra|nonprofit)\b/i;
 const PAGE_RANK = ['leadership', 'team', 'about', 'founder', 'management', 'people', 'our-story', 'who-we-are', 'executive', 'board', 'company', 'staff', 'meet', 'officers', 'history', 'owner', 'contact'];
 
-const ENTITIES = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ', ndash: '–', mdash: '—', rsquo: '’', lsquo: '‘', rdquo: '”', ldquo: '“', hellip: '…' };
+const ENTITIES = { copy: '©', reg: '®', amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ', ndash: '–', mdash: '—', rsquo: '’', lsquo: '‘', rdquo: '”', ldquo: '“', hellip: '…' };
 const decode = (s) => s
   .replace(/&#x([0-9a-f]+);/gi, (_, h) => String.fromCodePoint(parseInt(h, 16)))
   .replace(/&#(\d+);/g, (_, d) => String.fromCodePoint(Number(d)))
@@ -78,7 +78,7 @@ function structuredPeople(html) {
 // A usable company name from a footer or page title: without "Copyright © 2026 -", "All rights reserved" or a
 // tagline after a dash ("Acme Co - Environmental Consultants in Sacramento"). Null if nothing name-like is left.
 function cleanCompany(s) {
-  let t = squash(decode(String(s || ''))).replace(/\.?\s*all rights reserved.*$/i, '');
+  let t = squash(decode(String(s || ''))).replace(/\.?\s*(all rights reserved|版权所有).*$/i, '');
   t = t.replace(/^(?:copyright|©|\(c\)|\d{4}(?:\s*[-–]\s*\d{2,4})?|[-–|,.:\s])+/i, '');
   t = squash(t.split(/\s[|–—-]\s|\|/)[0]).replace(/[.,\s]+$/, '');
   return t.length >= 3 && t.split(' ').length <= 6 && /\p{L}/u.test(t) ? t.slice(0, 60) : null;
@@ -241,17 +241,37 @@ let nextSearchAt = 0;
 const blocked = new Map(); // engine -> last time SearXNG reported it unresponsive
 
 // Yahoo first, read directly from this function (free, and it answers Vercel's US servers properly); your
-// SearXNG when Yahoo has nothing or pushes back. After a push-back Yahoo is left alone for 5 minutes.
+// SearXNG when Yahoo has nothing or pushes back. Measured from one Vercel server: one search every 3 s works,
+// one a second gets it blocked within seconds. A dropped connection is just retried; only a real push-back
+// (an error status or a challenge page) makes Yahoo rest for 5 minutes.
+const YAHOO_PACE_MS = 3500;
+let yahooNextAt = 0;
 let yahooRestUntil = 0;
+async function askYahoo(query) {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const wait = yahooNextAt - Date.now();
+    yahooNextAt = Math.max(Date.now(), yahooNextAt) + YAHOO_PACE_MS;
+    if (wait > 0) await sleep(wait);
+    if (Date.now() < yahooRestUntil) return null;
+    try {
+      const y = await yahooSearch(query, 8);
+      if (y.blocked) { yahooRestUntil = Date.now() + 5 * 60 * 1000; blocked.set('yahoo-direct', Date.now()); return null; }
+      return y.results;
+    } catch {
+      // dropped connection or timeout: try once more
+    }
+  }
+  return null;
+}
+
 async function pacedSearch(query) {
+  if (Date.now() >= yahooRestUntil) {
+    const results = await askYahoo(query);
+    if (results && results.length) return results;
+  }
   const wait = nextSearchAt - Date.now();
   nextSearchAt = Math.max(Date.now(), nextSearchAt) + PACE_MS;
   if (wait > 0) await sleep(wait);
-  if (Date.now() >= yahooRestUntil) {
-    const y = await yahooSearch(query, 8).catch(() => ({ blocked: true }));
-    if (y.blocked) { yahooRestUntil = Date.now() + 5 * 60 * 1000; blocked.set('yahoo-direct', Date.now()); }
-    if (y.results && y.results.length) return y.results;
-  }
   if (!searchConfigured()) return [];
   try {
     const res = await searxngSearch(query, 8);
