@@ -50,8 +50,16 @@ local SearXNG, start it with Docker (see `searxng/README.md`) and set `SEARXNG_U
   general AI path. It works in two passes over the list:
   - **Website pass:** every company's website is read and judged, about 48 companies at once (3 requests of 16).
     No searching happens here, so it cannot get the search server blocked; most companies are verified in minutes.
-  - **Search pass:** only the companies still open are researched in full (website again, then searches), one batch
-    of 40 at a time with 8 companies at once, because searches start at most one per second.
+    Free sources that never block servers are used here too:
+    - **Wikidata**: any organisation whose official website is the lead's domain, with its CEO / director / chair
+      (one query per batch). Covers big companies, universities and well-known nonprofits.
+    - **IRS Form 990** (ProPublica Nonprofit Explorer) for nonprofits (.org or a nonprofit-sounding name): the
+      officers on the latest filing, e.g. the Executive Director.
+    - The website itself is read deeper: pages linked from the About / Team pages are followed too.
+  - **Deep pass:** only the companies still open are researched in full, one batch of 40 at a time with 8 companies
+    at once: the website again, then the **Wayback Machine** (team pages nothing links to any more, and old copies
+    of sites that are down or block robots; requests spaced 4.5 s apart, since it blocks bursts), then searches
+    (at most one per second), then Google if `SERPER_KEY` has credits.
 
   Per company the full research is a budgeted best-first search:
   - **Moves**, most promising first: the company's home page and About / Team / Leadership pages; then pages the home

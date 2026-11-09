@@ -1,15 +1,18 @@
 'use strict';
 const { streamRoute, httpError, cleanModel } = require('./_lib');
 const { researchDomain, engineHealth } = require('./_leads');
+const { wikidataLookup } = require('./_sources');
 
 // Companies researched at once. Reading websites and judging run in parallel; searches still start one
 // second apart (paced in _leads.js), so more workers do not mean a burst on your SearXNG server.
 // The website pass (pass: 'site') does no searching at all, so it runs more companies at once.
 const WORKERS = 8;
 const SITE_WORKERS = 16;
-// The function may run 300 s (vercel.json). New companies are only started in the first 170 s; any not
-// started come back as `remaining` and the page sends them again.
-const START_MS = 170000;
+// The function may run 300 s (vercel.json). New companies are only started in the first 170 s of a website
+// pass (about 30 s per company) and the first 120 s of a full pass (up to 165 s per company); any not started
+// come back as `remaining` and the page sends them again.
+const SITE_START_MS = 170000;
+const FULL_START_MS = 120000;
 const DOMAIN = /^(?=.{4,253}$)([a-z0-9-]{1,63}\.)+[a-z]{2,63}$/;
 
 // Researches a batch of company domains (from lead emails), streaming each result as it is found.
@@ -27,14 +30,17 @@ module.exports = streamRoute(async (req, emit) => {
   const started = Date.now();
   const usage = { input: 0, output: 0, searches: 0, google: 0, pages: 0 };
   const results = [];
+  // Organisations whose official website is one of these domains, with their CEO / director / chair: one
+  // Wikidata query for the whole batch.
+  const wikidata = await wikidataLookup(domains).catch(() => ({}));
   let next = 0;
   await Promise.all(Array.from({ length: Math.min(siteOnly ? SITE_WORKERS : WORKERS, domains.length) }, async () => {
-    while (next < domains.length && Date.now() - started < START_MS) {
+    while (next < domains.length && Date.now() - started < (siteOnly ? SITE_START_MS : FULL_START_MS)) {
       const domain = domains[next++];
       emit({ type: 'company', domain });
       let result;
       try {
-        result = await researchDomain(domain, model, (ev) => emit({ ...ev, domain }), usage, namesFor(domain), { siteOnly });
+        result = await researchDomain(domain, model, (ev) => emit({ ...ev, domain }), usage, namesFor(domain), { siteOnly, wikidata: wikidata[domain] || [] });
       } catch (e) {
         // Only problems that stop every company end the batch: no OpenAI credit (402) or a key/permission
         // problem (401/403). Anything else affects just this company, which the page retries later.

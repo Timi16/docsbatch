@@ -7,8 +7,10 @@
 // unsolved then get one last round of Google searches (Serper, paid) when SERPER_KEY is set. Outcome: verified, likely (a strong candidate that
 // narrowly failed a check, for a person to confirm) or not found, always with the reason and what was tried.
 const { openai, searxngSearch, searchConfigured, serperAllowed, serperSearch, normalize } = require('./_lib');
+const { nonprofitOfficers, archivedPages, archivedCopy } = require('./_sources');
 
-const UA = 'Mozilla/5.0 (compatible; DocBatch/1.0; company research)';
+// A normal browser's identity: many small-business sites (Wix, Cloudflare) refuse unknown robots.
+const UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36';
 const ROLE = /\b(chief executive officer|ceo|co-?founder|founder|co-?owner|owner|president|managing director|managing partner|managing member|principal|executive director|general manager|proprietor|commodore|chairman|chairwoman|chairperson)\b/i;
 const PAGE_HINT = /(about|team|leadership|management|our-?story|who-?we-?are|company|founder|people|staff|executive|board|contact|meet|history|officers|owner)/i;
 const COMMON_PATHS = ['/about', '/about-us', '/team', '/our-team', '/leadership', '/company', '/who-we-are', '/our-story', '/management', '/people', '/staff', '/contact', '/contact-us'];
@@ -149,12 +151,60 @@ async function moveHome(st, emit) {
   addPage(st, home);
 }
 
-// Reads pages not read yet, in parallel.
-async function readPages(st, urls, emit) {
-  const fresh = [...new Set(urls)].filter((u) => !st.read.has(u.replace(/\/+$/, ''))).slice(0, 5);
+// Reads pages not read yet, in parallel. Their own About / Team links are kept for the next step, so a
+// leadership page two clicks from the home page is still found.
+async function readPages(st, urls, emit, max = 5) {
+  const fresh = [...new Set(urls)].filter((u) => !st.read.has(u.replace(/\/+$/, ''))).slice(0, max);
   fresh.forEach((u) => st.read.add(u.replace(/\/+$/, '')));
   const pages = await Promise.all(fresh.map((u) => fetchPage(u)));
-  for (const p of pages) if (p) { st.pages++; emit({ type: 'open', url: p.url }); addPage(st, p); }
+  for (const p of pages) {
+    if (!p) continue;
+    st.pages++;
+    emit({ type: 'open', url: p.url });
+    addPage(st, p);
+    st.more.push(...candidateLinks(p.html, p.url, st.domain));
+  }
+}
+
+// Old copies from the Wayback Machine, for sites that are down, block us, or no longer link their team page.
+async function readArchived(st, urls, emit) {
+  const fresh = [...new Set(urls)].filter((u) => !st.read.has(`archive:${u.replace(/\/+$/, '')}`)).slice(0, 2);
+  fresh.forEach((u) => st.read.add(`archive:${u.replace(/\/+$/, '')}`));
+  const copies = await Promise.all(fresh.map((u) => archivedCopy(u)));
+  for (const c of copies) {
+    if (!c) continue;
+    st.pages++;
+    emit({ type: 'open', url: c.url });
+    if (!st.reachable && !st.nameFromSite) { const n = companyNameFrom(c.html, st.domain); if (n) st.company = n; }
+    addPage(st, c, c.date);
+  }
+}
+
+const rankUrl = (u) => { const i = PAGE_RANK.findIndex((w) => u.toLowerCase().includes(w)); return i < 0 ? 99 : i; };
+// Whether any page read so far mentions a leadership role at all.
+const leaderOnSite = (st) => st.evidence.some((e) => e.site && ROLE.test(e.text.replace(/^Footer:.*$/m, '')));
+
+// Stubborn round, still free: leadership pages the Wayback Machine has seen on this domain (read live, and
+// from the archive if the live page is gone), and the archived home page when the site is down.
+// Skipped when the live site already shows leadership lines (the archive would only repeat them).
+async function moveArchive(st, emit) {
+  if (st.reachable && leaderOnSite(st)) return;
+  if (!st.reachable) await readArchived(st, [`https://${st.domain}/`], emit);
+  const urls = await archivedPages(st.domain, rankUrl).catch(() => []);
+  if (st.reachable) await readPages(st, urls.map((u) => st.base + new URL(u).pathname), emit);
+  if (!leaderOnSite(st)) await readArchived(st, urls.slice(0, 1), emit);
+}
+
+// Nonprofits: the officers on the latest IRS Form 990 (ProPublica), found by the organisation's name.
+async function moveNonprofit(st, emit) {
+  for (const name of [...new Set([st.legal, st.company].filter(Boolean))]) {
+    const found = await nonprofitOfficers(name).catch(() => null);
+    if (!found) continue;
+    emit({ type: 'open', url: found.url });
+    addEvidence(st, `IRS FORM 990${found.year ? ` (fiscal year ending ${found.year})` : ''} via ProPublica: ${found.org}, ${found.city || ''} ${found.state || ''}`,
+      found.officers.map((o) => `- ${o.name} (${o.title}) (${found.url})`).join('\n'));
+    return;
+  }
 }
 
 // Leadership-looking pages listed in the sitemap, best first (both usual sitemap addresses are asked at once).
@@ -177,7 +227,8 @@ async function moveSite(st, emit) {
   await moveHome(st, emit);
   if (!st.reachable) return;
   const [, fromSitemap] = await Promise.all([readPages(st, st.links.slice(0, 4), emit), sitemapLinks(st.base)]);
-  await readPages(st, [...st.links.slice(4, 8), ...fromSitemap, ...COMMON_PATHS.map((p) => st.base + p)], emit);
+  const deeper = st.more.sort((a, b) => rankUrl(a) - rankUrl(b));
+  await readPages(st, [...st.links.slice(4, 8), ...deeper, ...fromSitemap, ...COMMON_PATHS.map((p) => st.base + p)], emit, 7);
 }
 
 // ---- searching ------------------------------------------------------------------------------------
@@ -230,7 +281,8 @@ async function moveSearch(st, query, emit, google = false) {
 
 // ---- evidence -------------------------------------------------------------------------------------
 
-function addPage(st, page) {
+// archived: the snapshot date when the page is an old copy from the Wayback Machine.
+function addPage(st, page, archived = null) {
   const people = structuredPeople(page.html);
   const text = htmlToText(page.html);
   if (!st.legal) {
@@ -238,13 +290,14 @@ function addPage(st, page) {
     if (c) st.legal = cleanCompany(c[1]);
   }
   const lines = roleLines(text, 1800);
-  if (people.length || lines) addEvidence(st, `WEBSITE ${page.url}`, `${people.map((x) => `Structured data — ${x}`).join('\n')}${people.length ? '\n' : ''}${lines}`, true);
+  const label = archived ? `ARCHIVED COPY (snapshot ${archived}) ${page.url}` : `WEBSITE ${page.url}`;
+  if (people.length || lines) addEvidence(st, label, `${people.map((x) => `Structured data — ${x}`).join('\n')}${people.length ? '\n' : ''}${lines}`, true, !!archived);
 }
 
-function addEvidence(st, label, text, site = false) {
+function addEvidence(st, label, text, site = false, archived = false) {
   if (!text || st.labels.has(label)) return;
   st.labels.add(label);
-  st.evidence.push({ label, text, site });
+  st.evidence.push({ label, text, site, archived });
 }
 
 // What the judge reads: the company's own pages first, then the search results with the most leadership
@@ -310,6 +363,9 @@ Rules:
 - If the evidence only names someone below the top (e.g. a Vice President), return them with is_top_executive false.
 - If the evidence does not name anyone, return name null.
 - confidence: 0.9 when the company's own site or an official source names them with the title; 0.7 for a clear reliable third-party source (a LinkedIn title "CEO at <company>", a press release); lower when unsure.
+- WIKIDATA facts are matched to this company by its official website: 0.8, unless the company's own pages name someone newer.
+- IRS FORM 990 lists a nonprofit's officers as filed with the IRS: its Executive Director / CEO / President (staff, usually paid) counts, 0.85 when the filing is from the last 3 years, 0.7 if older; an unpaid board President counts only when no executive director or CEO is listed.
+- ARCHIVED COPY pages are old snapshots of the company's site: 0.75 when the snapshot is from the last 2 years, 0.55 if older.
 - If the evidence shows one of the lead-list people is this company's owner, founder, president or CEO, they count.
 - name: the person's full name only, without titles like Mr, Dr or CEO. A shortened surname (e.g. "Melissa B.") is not a full name: return name null.
 - Also report what helps the next search: the company's real name and location if the evidence shows them, and next_search: the single short web search most likely to find the current top executive (null if already found).`;
@@ -380,7 +436,8 @@ function proofFor(st, name) {
   let onSite = false;
   if (!key) return { onSite, hosts };
   for (const e of st.evidence) {
-    if (e.site) { if (fold(e.text).includes(key)) { onSite = true; hosts.add(st.domain); } continue; }
+    if (e.site && !e.archived) { if (fold(e.text).includes(key)) { onSite = true; hosts.add(st.domain); } continue; }
+    if (e.site) { if (fold(e.text).includes(key)) hosts.add('web.archive.org'); continue; }
     for (const line of e.text.split('\n')) {
       const m = line.match(/\((https?:\/\/[^)\s]+)\)\s*$/);
       if (m && fold(line).includes(key)) hosts.add(host(m[1]));
@@ -419,18 +476,21 @@ function accept(pick, evidence, company = '', domain = '', proofOf = null) {
 // most SERPER_PER_COMPANY (default 2) searches. The free rounds stop at FREE_MS so it always has time left.
 const ROUNDS = [
   { site: true, searches: 0 },
+  { archive: true, searches: 0 },
   { searches: 2 },
   { searches: 2 },
   { google: true },
 ];
-const FREE_MS = 90000;
-const MAX_MS = 120000;
+// Generous, because waiting in the paced search and archive queues counts too.
+const FREE_MS = 140000;
+const MAX_MS = 165000;
 const googlePerCompany = () => Math.max(0, Math.min(4, Number(process.env.SERPER_PER_COMPANY ?? 2) || 0));
 
-// siteOnly: just the website round (the page's first pass over a whole list); searching comes in a later call.
-async function researchDomain(domain, model, emit, usage, contacts = [], { siteOnly = false } = {}) {
+// siteOnly: just the website round (the page's first pass over a whole list); the archive and searches come
+// in a later call, which runs one batch at a time. wikidata: facts already looked up for this domain (_sources.wikidataLookup).
+async function researchDomain(domain, model, emit, usage, contacts = [], { siteOnly = false, wikidata = [] } = {}) {
   const st = {
-    domain, company: stemName(domain), nameFromSite: false, legal: null, location: null, base: null, links: [], read: new Set(),
+    domain, company: stemName(domain), nameFromSite: false, legal: null, location: null, base: null, links: [], more: [], read: new Set(),
     evidence: [], labels: new Set(), tried: new Set(), triedGoogle: new Set(), suggested: [], sawDeputy: false,
     reachable: false, searches: 0, google: 0, pages: 0, judges: 0,
   };
@@ -438,10 +498,18 @@ async function researchDomain(domain, model, emit, usage, contacts = [], { siteO
   const canSearch = searchConfigured();
   let best = null;
   let last = { ok: false, code: 'none', reason: 'Nothing found' };
+  if (wikidata.length) {
+    emit({ type: 'open', url: wikidata[0].url });
+    addEvidence(st, 'WIKIDATA', wikidata.map((w) => `- ${w.org} (official website ${domain}) — ${w.role}: ${w.person}${w.start ? `, since ${w.start}` : ''} (${w.url})`).join('\n'));
+  }
   for (const round of siteOnly ? ROUNDS.slice(0, 1) : ROUNDS) {
     if (Date.now() - started > (round.google ? MAX_MS : FREE_MS)) continue;
     const before = st.evidence.length;
-    if (round.site) await moveSite(st, emit);
+    if (round.site) {
+      await moveSite(st, emit);
+      if (/\.org$/.test(domain) || NONPROFIT.test(`${st.company} ${st.legal || ''}`)) await moveNonprofit(st, emit);
+    }
+    if (round.archive) await moveArchive(st, emit);
     if (round.google) {
       if (!googlePerCompany() || !(await serperAllowed())) break;
       for (const q of nextQueries(st, contacts, googlePerCompany(), st.triedGoogle)) await moveSearch(st, q, emit, true);
@@ -454,7 +522,10 @@ async function researchDomain(domain, model, emit, usage, contacts = [], { siteO
       const p = judged.pick;
       return { domain, company: st.company, status: 'verified', name: last.name, title: squash(p.title).slice(0, 80) || null, url: p.evidence_url || null, quote: squash(p.evidence_quote).slice(0, 240) || null, searches: st.searches, google: st.google, pages: st.pages, rounds: st.judges };
     }
-    if (last.likely || (last.code === 'weak' && last.name)) best = { ...judged.pick, name: last.name, reason: last.reason };
+    // A founder, owner or president the judge did not rank as the top (it may suspect an unnamed CEO) is still
+    // the best lead to the company: shown as Likely for a person to confirm.
+    const leaderTitle = /\b(founder|co-?founder|owner|president|managing (director|partner)|principal)\b/i.test(judged.pick.title || '') && !/\bvice\b/i.test(judged.pick.title || '');
+    if (last.likely || (last.code === 'weak' && last.name) || (last.code === 'not_top' && last.name && leaderTitle)) best = { ...judged.pick, name: last.name, reason: last.reason };
   }
   const tried = `tried ${st.pages} page${st.pages === 1 ? '' : 's'} and ${st.searches} search${st.searches === 1 ? '' : 'es'}${st.google ? ` + ${st.google} Google` : ''}`;
   if (best) {
