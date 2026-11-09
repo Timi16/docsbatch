@@ -500,7 +500,8 @@ function accept(pick, evidence, company = '', domain = '', proofOf = null) {
   // "Glenn Armentor" at "The Glenn Armentor Law Corporation" is the namesake, a person; only a "name" that
   // contains the whole company name is the company itself.
   const looksLikeCompany = BUSINESS_WORD.test(name) || (company && fold(name).includes(fold(company)));
-  if (words.length < 2 || words.length > 5 || ROLE.test(name) || /\d/.test(name) || looksLikeCompany) return { ok: false, code: 'not_person', reason: `"${name}" does not look like a person's full name` };
+  const repeats = new Set(words.map((w) => w.toLowerCase())).size < words.length; // "Barberito Photograph Barberito"
+  if (words.length < 2 || words.length > 5 || repeats || ROLE.test(name) || /\d/.test(name) || looksLikeCompany) return { ok: false, code: 'not_person', reason: `"${name}" does not look like a person's full name` };
   const plain = fold(name).replace(/\s+(jr|sr|ii|iii|iv)$/, '');
   if (!fold(evidence).includes(fold(name)) && !fold(evidence).includes(plain)) return { ok: false, code: 'not_in_evidence', reason: `"${name}" is not in the evidence, so it was not trusted` };
   const tidy = name === name.toLowerCase() ? name.replace(/\b\p{L}/gu, (c) => c.toUpperCase()) : name;
