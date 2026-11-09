@@ -6,7 +6,7 @@
 // executive is verified or the company's budget is spent (at most 3 judge rounds and 4 searches). Companies still
 // unsolved then get one last round of Google searches (Serper, paid) when SERPER_KEY is set. Outcome: verified, likely (a strong candidate that
 // narrowly failed a check, for a person to confirm) or not found, always with the reason and what was tried.
-const { openai, searxngSearch, searchConfigured, serperAllowed, serperSearch, normalize } = require('./_lib');
+const { openai, searxngSearch, searchConfigured, serperAllowed, serperSearch, yahooSearch, normalize } = require('./_lib');
 const { nonprofitOfficers, archivedPages, archivedCopy } = require('./_sources');
 
 // A normal browser's identity: many small-business sites (Wix, Cloudflare) refuse unknown robots.
@@ -240,10 +240,19 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 let nextSearchAt = 0;
 const blocked = new Map(); // engine -> last time SearXNG reported it unresponsive
 
+// Yahoo first, read directly from this function (free, and it answers Vercel's US servers properly); your
+// SearXNG when Yahoo has nothing or pushes back. After a push-back Yahoo is left alone for 5 minutes.
+let yahooRestUntil = 0;
 async function pacedSearch(query) {
   const wait = nextSearchAt - Date.now();
   nextSearchAt = Math.max(Date.now(), nextSearchAt) + PACE_MS;
   if (wait > 0) await sleep(wait);
+  if (Date.now() >= yahooRestUntil) {
+    const y = await yahooSearch(query, 8).catch(() => ({ blocked: true }));
+    if (y.blocked) { yahooRestUntil = Date.now() + 5 * 60 * 1000; blocked.set('yahoo-direct', Date.now()); }
+    if (y.results && y.results.length) return y.results;
+  }
+  if (!searchConfigured()) return [];
   try {
     const res = await searxngSearch(query, 8);
     for (const e of res.unresponsive || []) blocked.set(e, Date.now());
@@ -495,7 +504,7 @@ async function researchDomain(domain, model, emit, usage, contacts = [], { siteO
     reachable: false, searches: 0, google: 0, pages: 0, judges: 0,
   };
   const started = Date.now();
-  const canSearch = searchConfigured();
+  const canSearch = true; // Yahoo needs no setup; SearXNG is the fallback when configured
   let best = null;
   let last = { ok: false, code: 'none', reason: 'Nothing found' };
   if (wikidata.length) {

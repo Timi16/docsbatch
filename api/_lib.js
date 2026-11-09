@@ -244,6 +244,40 @@ async function searxngSearch(query, limit = 5, { engines } = {}) {
   };
 }
 
+// Yahoo results read straight from Yahoo's results page, from the function itself (free). Vercel runs in the US
+// and its servers change address, which Yahoo tolerates; from the SearXNG server it fails. Returns
+// { results } or { blocked: true } when Yahoo answers with a challenge or an error.
+const YAHOO_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36';
+const HTML_ENTITIES = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ', middot: '·', rsquo: '’', lsquo: '‘', rdquo: '”', ldquo: '“', ndash: '–', mdash: '—', hellip: '…' };
+const plainText = (s) => String(s || '').replace(/<[^>]+>/g, ' ')
+  .replace(/&#x([0-9a-f]+);/gi, (_, h) => String.fromCodePoint(parseInt(h, 16)))
+  .replace(/&#(\d+);/g, (_, d) => String.fromCodePoint(Number(d)))
+  .replace(/&([a-z]+);/gi, (m, n) => HTML_ENTITIES[n.toLowerCase()] ?? m)
+  .replace(/\s+/g, ' ').trim();
+
+async function yahooSearch(query, limit = 8) {
+  const r = await fetch(`https://search.yahoo.com/search?p=${encodeURIComponent(String(query).slice(0, 300))}`, {
+    headers: { 'User-Agent': YAHOO_UA, Accept: 'text/html', 'Accept-Language': 'en-US,en;q=0.9' },
+    signal: AbortSignal.timeout(12000),
+  });
+  if (!r.ok) return { blocked: true };
+  const html = await r.text();
+  if (/captcha|unusual traffic/i.test(html.slice(0, 20000)) && !/class="dd [^"]*algo/.test(html)) return { blocked: true };
+  const results = [];
+  for (const block of html.split(/<div class="dd [^"]*algo/).slice(1)) {
+    const href = (block.match(/href="([^"]+)"/) || [])[1] || '';
+    const ru = href.match(/\/RU=([^/]+)\//);
+    const url = ru ? decodeURIComponent(ru[1]) : plainText(href);
+    const title = plainText((block.match(/<h3[^>]*>([\s\S]*?)<\/h3>/) || [])[1]);
+    const snippet = plainText((block.match(/<div class="compText[^"]*">([\s\S]*?)<\/div>/) || [])[1]);
+    const facts = [...block.matchAll(/<label[^>]*>([^<]+)<\/label>\s*([^<]+)</g)].map((m) => `${plainText(m[1])} ${plainText(m[2])}`).join('; ');
+    if (!/^https?:\/\//.test(url) || /(^|\.)(yahoo|bing)\.com\//.test(url.replace(/^https?:\/\//, '')) || !title) continue;
+    results.push(trimResult({ title, url, content: [snippet, facts].filter(Boolean).join(' — ') }));
+    if (results.length >= limit) break;
+  }
+  return { results };
+}
+
 // Google results from Serper (paid, about $1 per 1,000 searches). Only the lead engine uses it, and only for
 // companies that the website and free searches could not solve; the chat's web search never does.
 const serperConfigured = () => !!String(process.env.SERPER_KEY || '').trim();
@@ -374,5 +408,5 @@ function normalize(r) {
 module.exports = {
   BASE, MAX_UPLOAD_CHUNK_BYTES, MAX_FILE_BYTES, FILE_TTL_SECONDS, SYSTEM, SEARCH_NOTE, FINISH, MORE, ITEMS_PER_TURN,
   httpError, allowedModels, apiKey, checkAuth, route, streamRoute, openai, openaiStream, SEARCH_TOOL, searchConfigured, webSearch, searxngSearch,
-  serperConfigured, serperAllowed, serperSearch, cleanTask, cleanModel, cleanItem, buildRequest, normalize,
+  serperConfigured, serperAllowed, serperSearch, yahooSearch, cleanTask, cleanModel, cleanItem, buildRequest, normalize,
 };

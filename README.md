@@ -60,6 +60,9 @@ local SearXNG, start it with Docker (see `searxng/README.md`) and set `SEARXNG_U
     at once: the website again, then the **Wayback Machine** (team pages nothing links to any more, and old copies
     of sites that are down or block robots; requests spaced 4.5 s apart, since it blocks bursts), then searches
     (at most one per second), then Google if `SERPER_KEY` has credits.
+  - **Searches go to Yahoo first**, read straight from Yahoo's results page by the Vercel function (free). Vercel's
+    servers are in the US and change address, which Yahoo tolerates, while a single search server gets blocked.
+    Your SearXNG is used when Yahoo finds nothing or pushes back (Yahoo then rests for 5 minutes).
 
   Per company the full research is a budgeted best-first search:
   - **Moves**, most promising first: the company's home page and About / Team / Leadership pages; then pages the home
