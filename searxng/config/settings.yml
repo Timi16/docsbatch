@@ -41,6 +41,12 @@ outgoing:
 
 # SearXNG ships these switched off; turn them on so searches are spread across six web engines.
 engines:
+  # Optional: send Bing out through a residential proxy, so it sees a normal home connection instead of this
+  # server (DuckDuckGo, Yahoo and Brave spot automated requests whatever the address, so a proxy does not help
+  # them). Put the real login only in the server's copy of this file, never in git:
+  #   proxies:
+  #     all://:
+  #       - http://USERNAME:PASSWORD@geo.floppydata.com:10080
   - name: bing
     disabled: false
   - name: yahoo

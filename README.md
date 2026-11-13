@@ -64,9 +64,11 @@ local SearXNG, start it with Docker (see `searxng/README.md`) and set `SEARXNG_U
     to 12 searches and about 4 minutes each (LinkedIn, Bizapedia / OpenCorporates state filings, the leads' own
     names), 8 companies per request with 4 at a time. A founder, owner, president or executive director named on
     the company's own site counts, and so does the namesake of a firm ("Gleason" at Gleason Legal).
-  - **Searches go to Yahoo first**, read straight from Yahoo's results page by the Vercel function (free). Vercel's
-    servers are in the US and change address, which Yahoo tolerates, while a single search server gets blocked.
-    Your SearXNG is used when Yahoo finds nothing or pushes back (Yahoo then rests for 5 minutes).
+  - **Searches take turns between Yahoo and your SearXNG.** Yahoo is read straight from its results page by the
+    Vercel function (free): Vercel's servers are in the US and change address, which Yahoo tolerates. SearXNG's
+    Bing can go out through a residential proxy (see `searxng/config/settings.yml`), so it is not blocked either.
+    Whichever finds nothing hands the search to the other; while Yahoo rests (5 minutes after a push-back),
+    SearXNG takes every search.
 
   Per company the full research is a budgeted best-first search:
   - **Moves**, most promising first: the company's home page and About / Team / Leadership pages; then pages the home

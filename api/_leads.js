@@ -242,8 +242,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 let nextSearchAt = 0;
 const blocked = new Map(); // engine -> last time SearXNG reported it unresponsive
 
-// Yahoo first, read directly from this function (free, and it answers Vercel's US servers properly); your
-// SearXNG when Yahoo has nothing or pushes back. Measured from one Vercel server: one search every 3 s works,
+// Yahoo, read directly from this function (free, and it answers Vercel's US servers properly), takes turns
+// with your SearXNG (see pacedSearch). Measured from one Vercel server: one search every 3 s works,
 // one a second gets it blocked within seconds. A dropped connection is just retried; only a real push-back
 // (an error status or a challenge page) makes Yahoo rest for 5 minutes.
 const YAHOO_PACE_MS = 3500;
@@ -266,15 +266,12 @@ async function askYahoo(query) {
   return null;
 }
 
-async function pacedSearch(query) {
-  if (Date.now() >= yahooRestUntil) {
-    const results = await askYahoo(query);
-    if (results && results.length) return results;
-  }
+// Your SearXNG, one search a second from each server.
+async function askSearx(query) {
+  if (!searchConfigured()) return [];
   const wait = nextSearchAt - Date.now();
   nextSearchAt = Math.max(Date.now(), nextSearchAt) + PACE_MS;
   if (wait > 0) await sleep(wait);
-  if (!searchConfigured()) return [];
   try {
     const res = await searxngSearch(query, 8);
     for (const e of res.unresponsive || []) blocked.set(e, Date.now());
@@ -282,6 +279,23 @@ async function pacedSearch(query) {
   } catch {
     return [];
   }
+}
+
+// Searches take turns between Yahoo (read from this function) and your SearXNG (whose Bing goes out through a
+// US residential proxy), so each is asked half as often: faster, and less likely to be pushed back. Whichever
+// answers nothing hands the query to the other; while Yahoo rests, everything goes to SearXNG.
+let turn = 0;
+async function pacedSearch(query) {
+  const searxFirst = searchConfigured() && (turn++ % 2 === 1 || Date.now() < yahooRestUntil);
+  if (searxFirst) {
+    const results = await askSearx(query);
+    if (results.length) return results;
+  }
+  if (Date.now() >= yahooRestUntil) {
+    const results = await askYahoo(query);
+    if (results && results.length) return results;
+  }
+  return searxFirst ? [] : askSearx(query);
 }
 
 // Search results that never mention the company are dropped: a blocked engine answers with unrelated pages,
