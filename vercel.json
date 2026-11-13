@@ -1,6 +1,6 @@
 {
   "outputDirectory": "public",
   "functions": {
-    "api/*.js": { "maxDuration": 300 }
+    "api/*.js": { "maxDuration": 300, "memory": 1024 }
   }
 }

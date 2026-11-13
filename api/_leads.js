@@ -28,7 +28,9 @@ const squash = (s) => String(s || '').replace(/\s+/g, ' ').trim();
 // For matching names against evidence: case, accents, punctuation and spacing do not matter.
 const fold = (s) => squash(String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^\p{L}\p{N}\s]/gu, ' ')).toLowerCase();
 
-async function fetchPage(url, ms = 6000, maxBytes = 1500000) {
+// Pages are cut at 800 KB: leadership names come early, and the rest of a big page is mostly scripts that
+// only cost CPU to read.
+async function fetchPage(url, ms = 6000, maxBytes = 800000) {
   try {
     const r = await fetch(url, { headers: { 'User-Agent': UA, Accept: 'text/html,application/xhtml+xml' }, redirect: 'follow', signal: AbortSignal.timeout(ms) });
     if (!r.ok || !/html/i.test(r.headers.get('content-type') || '')) return null;
@@ -225,9 +227,12 @@ async function sitemapLinks(base) {
 
 // The whole website in two parallel steps: the home page, then its best linked pages together with the
 // sitemap, then the next pages (more links, sitemap pages, common addresses like /about-us).
-async function moveSite(st, emit) {
+// light: the later passes, whose companies the website pass already read in full: just the home page and its
+// 4 best About / Team pages again (as evidence for the judge), which saves most of the CPU.
+async function moveSite(st, emit, light = false) {
   await moveHome(st, emit);
   if (!st.reachable) return;
+  if (light) { await readPages(st, st.links.slice(0, 4), emit); return; }
   const [, fromSitemap] = await Promise.all([readPages(st, st.links.slice(0, 4), emit), sitemapLinks(st.base)]);
   const deeper = st.more.sort((a, b) => rankUrl(a) - rankUrl(b));
   await readPages(st, [...st.links.slice(4, 8), ...deeper, ...fromSitemap, ...COMMON_PATHS.map((p) => st.base + p)], emit, 7);
@@ -579,7 +584,7 @@ async function researchDomain(domain, model, emit, usage, contacts = [], { siteO
     if (Date.now() - started > (round.google ? maxMs : freeMs)) continue;
     const before = st.evidence.length;
     if (round.site) {
-      await moveSite(st, emit);
+      await moveSite(st, emit, !siteOnly);
       if (/\.org$/.test(domain) || NONPROFIT.test(`${st.company} ${st.legal || ''}`)) await moveNonprofit(st, emit);
     }
     if (round.archive) await moveArchive(st, emit);
